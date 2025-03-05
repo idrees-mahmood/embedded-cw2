@@ -62,8 +62,11 @@ HardwareTimer sampleTimer(TIM1);
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
 
 // Threading
-struct {
+struct
+{
   std::bitset<32> inputs;
+  int8_t rotationVariable;
+  SemaphoreHandle_t mutex;
 } sysState;
 
 // Task handles
@@ -123,20 +126,24 @@ void sampleISR()
 void displayUpdateTask(void *pvParameters)
 {
   int lastKeyPressed = -1;
-  const TickType_t xFrequency = 100/portTICK_PERIOD_MS;
+  const TickType_t xFrequency = 100 / portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
-  
-  while (1) {
+
+  while (1)
+  {
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
-    
+
     // Determine which note name to display based on currentStepSize
     uint32_t stepSize = __atomic_load_n(&currentStepSize, __ATOMIC_RELAXED);
-    
+
     const char *pressedKey = "None";
-    if (stepSize > 0) {
+    if (stepSize > 0)
+    {
       // Find which note matches the current step size
-      for (int i = 0; i < 12; i++) {
-        if (stepSize == stepSizes[i]) {
+      for (int i = 0; i < 12; i++)
+      {
+        if (stepSize == stepSizes[i])
+        {
           pressedKey = noteNames[i];
           break;
         }
@@ -149,41 +156,90 @@ void displayUpdateTask(void *pvParameters)
     u8g2.drawStr(2, 10, "Pressed key: "); // write something to the internal memory
     u8g2.setCursor(75, 10);
     u8g2.print(pressedKey);
+
+    u8g2.setCursor(2, 20);
+    u8g2.print("Rotation: ");
+    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+    u8g2.print(sysState.rotationVariable);
+    xSemaphoreGive(sysState.mutex);
     u8g2.sendBuffer(); // transfer internal memory to the display
-    
+
+
     // Toggle LED for visual feedback
     digitalToggle(LED_BUILTIN);
   }
 }
 
+void decodeKnob3()
+{
+  static uint8_t prevState = 0b00;
+  uint8_t currentState;
+
+  // Read B and A signals, row 3, columns 1, 0
+  setRow(3);
+  delayMicroseconds(3);
+  std::bitset<4> result = readCols();
+  currentState = (result[1] << 1) | result[0];
+
+  // look up table for clockwise and counter clockwise
+  const int8_t rotationTable[4][4] = {
+      {0, 1, -1, 0},
+      {-1, 0, 0, 1},
+      {1, 0, 0, -1},
+      {0, -1, 1, 0}};
+
+  int8_t rotationChange = rotationTable[prevState][currentState];
+  //Serial.println("rotationchange: "+ rotationChange);
+
+  // Update the step size based on the rotation
+  if (rotationChange != 0)
+  {
+    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+    sysState.rotationVariable += rotationChange;
+    xSemaphoreGive(sysState.mutex);
+  }
+
+  prevState = currentState;
+}
+
 // Key scanning task
 void scanKeysTask(void *pvParameters)
 {
-  const TickType_t xFrequency = 50/portTICK_PERIOD_MS;
+  const TickType_t xFrequency = 20 / portTICK_PERIOD_MS;
   TickType_t xLastWakeTime = xTaskGetTickCount();
-  
-  while (1) {
+
+  while (1)
+  {
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
-    
+    decodeKnob3();
     int lastKeyPressed = -1; // default: no key pressed
 
-    for (uint8_t row = 0; row < 3; row++) {
+    for (uint8_t row = 0; row < 3; row++)
+    {
       setRow(row);
       delayMicroseconds(3);
       std::bitset<4> result = readCols();
+      xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+      sysState.inputs = result.to_ulong();
+      xSemaphoreGive(sysState.mutex);
 
-      for (uint8_t col = 0; col < 4; col++) {
+      for (uint8_t col = 0; col < 4; col++)
+      {
         int keyIndex = row * 4 + col;
-        if (keyIndex < 12 && !result[col]) { // Only check piano keys, active low logic
+        if (keyIndex < 12 && !result[col])
+        {                            // Only check piano keys, active low logic
           lastKeyPressed = keyIndex; // Store this pressed key
         }
       }
     }
 
     // Update the step size based on the last pressed key
-    if (lastKeyPressed != -1) {
+    if (lastKeyPressed != -1)
+    {
       __atomic_store_n(&currentStepSize, stepSizes[lastKeyPressed], __ATOMIC_RELAXED);
-    } else {
+    }
+    else
+    {
       __atomic_store_n(&currentStepSize, 0, __ATOMIC_RELAXED);
     }
   }
@@ -227,21 +283,29 @@ void setup()
   sampleTimer.attachInterrupt(sampleISR);
   sampleTimer.resume();
 
+  sysState.mutex = xSemaphoreCreateMutex();
+  if (sysState.mutex == NULL)
+  {
+    Serial.println("ERROR: Mutex creation failed");
+    while (1)
+      ;
+  }
+
   // Create tasks BEFORE starting the scheduler
   xTaskCreate(
-      scanKeysTask,       // Function to run
-      "scanKeys",         // Task name
-      64,                // Stack size in word
-      NULL,               // Parameters
-      2,                  // Priority
-      &scanKeysHandle);   // Task handle
+      scanKeysTask,     // Function to run
+      "scanKeys",       // Task name
+      64,               // Stack size in word
+      NULL,             // Parameters
+      2,                // Priority
+      &scanKeysHandle); // Task handle
 
   xTaskCreate(
-      displayUpdateTask,  // Function to run
-      "displayUpdate",    // Task name
-      256,                // Stack size in words 
-      NULL,               // Parameters
-      1,                  // Priority
+      displayUpdateTask,     // Function to run
+      "displayUpdate",       // Task name
+      256,                   // Stack size in words
+      NULL,                  // Parameters
+      1,                     // Priority
       &displayUpdateHandle); // Task handle
 
   // Start the scheduler
@@ -250,10 +314,14 @@ void setup()
 
   // Code should never reach here if scheduler starts properly
   Serial.println("ERROR: FreeRTOS scheduler failed to start");
-  while(1); // Infinite loop if scheduler fails
+
+  // Set initial states
+  sysState.rotationVariable = 0;
+
+  while (1)
+    ; // Infinite loop if scheduler fails
 }
 
 void loop()
 {
-  vTaskDelayUntil();
 }
