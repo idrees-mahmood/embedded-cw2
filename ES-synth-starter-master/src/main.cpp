@@ -72,6 +72,11 @@ HardwareTimer sampleTimer(TIM1);
 // Display driver object
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
 
+// CAN bus message queue
+QueueHandle_t msgInQ;
+
+/*------------------------------------------------------------------------------------------*/
+
 // Knob class definition for managing rotary encoders
 class Knob
 {
@@ -176,6 +181,7 @@ struct
 // Task handles
 TaskHandle_t scanKeysHandle = NULL;
 TaskHandle_t displayUpdateHandle = NULL;
+TaskHandle_t decodeTaskHandle = NULL;
 
 // Function to set outputs using key matrix
 void setOutMuxBit(const uint8_t bitIdx, const bool value)
@@ -238,6 +244,18 @@ void sampleISR()
     analogWrite(OUTL_PIN, Vout + 128); // Add output to left channel too
 }
 
+void CAN_RX_ISR()
+{
+    uint32_t ID;
+    uint8_t RX_Message_ISR[8];
+    while (CAN_CheckRXLevel())
+    {
+        CAN_RX(ID, RX_Message_ISR);
+        xQueueSendFromISR(msgInQ, RX_Message_ISR, NULL);
+    }
+}
+
+/*---------------------------------------TASKS--------------------------------------*/
 // Display update task
 void displayUpdateTask(void *pvParameters)
 {
@@ -424,14 +442,42 @@ void scanKeysTask(void *pvParameters)
         else
         {
             TX_Message[0] = 'R';
-            TX_Message[1] = 0;
-            TX_Message[2] = 0;
+            //TX_Message[1] = 0;
+            //TX_Message[2] = 0;
         }
 
         // Send the TX_Message
+        //Serial.println("Sending message");
+        
         CAN_TX(0x123, (uint8_t *)TX_Message);
+        //Serial.println("Message sent");
     }
 }
+
+void decodeTask(void *pvParameters)
+{
+    uint32_t ID;
+    uint8_t RX_Message[8];
+    while (1)
+    {
+        if (xQueueReceive(msgInQ, RX_Message, portMAX_DELAY) == pdTRUE)
+        {
+            //Serial.println("Message received");
+            if (RX_Message[0] == 'P')
+            {
+                //Serial.println("Pressed");
+                //Serial.println(RX_Message[1]);
+                //Serial.println(RX_Message[2]);
+                //Serial.println(" ");
+            }
+            else
+            {
+                //Serial.println("Released");
+            }
+        }
+    }
+}
+/*----------------------------THE REST--------------------------------------------*/
 
 void setup()
 {
@@ -465,6 +511,14 @@ void setup()
 
     // Initialize the keyboard
     setOutMuxBit(HKOE_BIT, HIGH); // Enable keyboard output
+
+    // Init CAN bus
+    CAN_Init(true); // true for loopback, false for normal
+    CAN_RegisterRX_ISR(CAN_RX_ISR); 
+    setCANFilter(0x123, 0x7ff);
+    CAN_Start();
+
+    msgInQ = xQueueCreate(36, 8);
 
     // Create mutex
     sysState.mutex = xSemaphoreCreateMutex();
@@ -500,6 +554,14 @@ void setup()
         1,                     // Priority
         &displayUpdateHandle); // Task handle
 
+    xTaskCreate(
+        decodeTask,     // Function to run
+        "decode",       // Task name
+        128,            // Stack size in words 
+        NULL,           // Parameters
+        1,              // Priority
+        &decodeTaskHandle);          // Task handle
+
     // Start the scheduler
     Serial.println("Starting FreeRTOS scheduler");
     vTaskStartScheduler();
@@ -507,10 +569,7 @@ void setup()
     // Code should never reach here if scheduler starts properly
     Serial.println("ERROR: FreeRTOS scheduler failed to start");
 
-    // Init CAN bus
-    CAN_Init(true); // true for loopback, false for normal
-    setCANFilter(0x123, 0x7ff);
-    CAN_Start();
+   
 
     while (1)
         ; // Infinite loop if scheduler fails
