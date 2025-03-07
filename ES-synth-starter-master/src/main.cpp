@@ -1,12 +1,12 @@
+#include "stm32l4xx_hal.h"
+#include "stm32l4xx_hal_rcc_ex.h"
+#include "stm32l4xx_hal_rcc.h"
+#include "stm32l4xx_hal_can.h"
 #include <Arduino.h>
 #include <U8g2lib.h>
 #include <bitset>
 #include <HardwareTimer.h>
 #include <STM32FreeRTOS.h>
-#include "stm32l4xx_hal.h"
-#include "stm32l4xx_hal_rcc_ex.h"
-#include "stm32l4xx_hal_rcc.h"
-#include "stm32l4xx_hal_can.h"
 #include <ES_CAN.h>
 
 // Constants
