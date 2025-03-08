@@ -64,16 +64,11 @@ volatile uint32_t currentStepSize = 0;
 // This will be accessed by both the ISR and the knob update task
 volatile int8_t volumeControl = 0;
 
-volatile uint8_t TX_Message[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-
 // Timer object
 HardwareTimer sampleTimer(TIM1);
 
 // Display driver object
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
-
-// CAN bus message queue
-QueueHandle_t msgInQ;
 
 /*------------------------------------------------------------------------------------------*/
 
@@ -114,8 +109,8 @@ public:
             if (newValue >= minValue && newValue <= maxValue)
             {
                 value = newValue;
-                Serial.println("Knob " + rowIndex);
-                Serial.println("Value: " + value);
+                //Serial.println("Knob " + rowIndex);
+                //Serial.println("Value: " + value);
 
                 return true; // Value was changed
             }
@@ -170,12 +165,16 @@ struct
 {
     std::bitset<32> inputs;
     SemaphoreHandle_t mutex;
+    QueueHandle_t txQueue;
+    QueueHandle_t rxQueue;
+    SemaphoreHandle_t CAN_TX_Semaphore;
     Knob knobs[4] = {
         Knob(3, 0, 1, 0, 0, 7),  // Knob 3: Row 3, cols 0,1, volume control (0-7)
         Knob(3, 2, 3, 0, 0, 15), // Knob 2: Row 3, cols 2,3, unused
         Knob(4, 0, 1, 0, 0, 15), // Knob 1: Row 4, cols 0,1, unused
         Knob(4, 2, 3, 0, 0, 15)  // Knob 0: Row 4, cols 2,3, unused
     };
+    uint8_t RX_Message[8]; // 
 } sysState;
 
 // Task handles
@@ -220,6 +219,8 @@ void setRow(uint8_t rowIdx)
     digitalWrite(REN_PIN, HIGH);
 }
 
+/*------------------------------ISRs-------------------------------------------*/
+
 void sampleISR()
 {
     static uint32_t phaseAcc = 0; // Phase accumulator, static (stores value between calls)
@@ -251,8 +252,14 @@ void CAN_RX_ISR()
     while (CAN_CheckRXLevel())
     {
         CAN_RX(ID, RX_Message_ISR);
-        xQueueSendFromISR(msgInQ, RX_Message_ISR, NULL);
+        //l.println("CAN RX ISR triggered");
+        xQueueSendFromISR(sysState.rxQueue, RX_Message_ISR, NULL);
     }
+}
+
+void CAN_TX_ISR()
+{
+    xSemaphoreGiveFromISR(sysState.CAN_TX_Semaphore, NULL);
 }
 
 /*---------------------------------------TASKS--------------------------------------*/
@@ -261,6 +268,7 @@ void displayUpdateTask(void *pvParameters)
 {
     const TickType_t xFrequency = 100 / portTICK_PERIOD_MS;
     TickType_t xLastWakeTime = xTaskGetTickCount();
+    uint8_t localRxMessage[8];
 
     while (1)
     {
@@ -286,11 +294,11 @@ void displayUpdateTask(void *pvParameters)
         // Get volume value directly from the atomic global
         int8_t volume = __atomic_load_n(&volumeControl, __ATOMIC_RELAXED);
 
-        uint32_t ID;
-        uint8_t RX_Message[8];
-        while (CAN_CheckRXLevel())
+        // Get the latest RX message data under mutex protection
+        if (xSemaphoreTake(sysState.mutex, portMAX_DELAY) == pdTRUE)
         {
-            CAN_RX(ID, RX_Message);
+            memcpy(localRxMessage, sysState.RX_Message, 8);
+            xSemaphoreGive(sysState.mutex);
         }
 
         // Update display
@@ -306,7 +314,7 @@ void displayUpdateTask(void *pvParameters)
 
         // Display additional knob values if needed
         u8g2.setCursor(2, 30);
-        u8g2.print("Knob values: ");
+        u8g2.print("Knobs: ");
         if (xSemaphoreTake(sysState.mutex, portMAX_DELAY) == pdTRUE)
         {
             for (int i = 1; i < 4; i++)
@@ -316,10 +324,20 @@ void displayUpdateTask(void *pvParameters)
             }
             xSemaphoreGive(sysState.mutex);
         }
-        u8g2.setCursor(66, 30);
-        u8g2.print((char)RX_Message[0]);
-        u8g2.print(RX_Message[1]);
-        u8g2.print(RX_Message[2]);
+
+        // Display the latest RX message
+        u8g2.setCursor(80, 30);
+        if (localRxMessage[0] != 0) // Only display if we have received something
+        {
+            u8g2.print((char)localRxMessage[0]); // 'P' or 'R'
+            u8g2.print(localRxMessage[1]);       // Octave
+            u8g2.print(localRxMessage[2]);       // Note
+        }
+        else
+        {
+            u8g2.print("---"); // No message received yet
+        }
+
         u8g2.sendBuffer(); // transfer internal memory to the display
 
         // Toggle LED for visual feedback
@@ -354,6 +372,7 @@ void scanKeysTask(void *pvParameters)
 {
     const TickType_t xFrequency = 10 / portTICK_PERIOD_MS;
     TickType_t xLastWakeTime = xTaskGetTickCount();
+    uint8_t txMsg[8] = {0};
 
     while (1)
     {
@@ -435,46 +454,70 @@ void scanKeysTask(void *pvParameters)
 
         if (lastKeyPressed != -1)
         {
-            TX_Message[0] = 'P';
-            TX_Message[1] = 4;
-            TX_Message[2] = lastKeyPressed % 12;
+            txMsg[0] = 'P';
+            txMsg[1] = 4;
+            txMsg[2] = lastKeyPressed % 12;
         }
         else
         {
-            TX_Message[0] = 'R';
-            //TX_Message[1] = 0;
-            //TX_Message[2] = 0;
+            txMsg[0] = 'R';
         }
 
         // Send the TX_Message
         //Serial.println("Sending message");
         
-        CAN_TX(0x123, (uint8_t *)TX_Message);
+        xQueueSend(sysState.txQueue, txMsg, 0); // Timeout - don't block if queue is full
         //Serial.println("Message sent");
     }
 }
 
 void decodeTask(void *pvParameters)
 {
-    uint32_t ID;
-    uint8_t RX_Message[8];
+    uint8_t rxMsg[8];
+
     while (1)
     {
-        if (xQueueReceive(msgInQ, RX_Message, portMAX_DELAY) == pdTRUE)
+        // Wait for a message from the RX queue
+        if (xQueueReceive(sysState.rxQueue, rxMsg, portMAX_DELAY) == pdTRUE)
         {
-            //Serial.println("Message received");
-            if (RX_Message[0] == 'P')
+            //l.println("Received message in decode task: ");
+            // Process the received message
+            if (rxMsg[0] == 'P')
             {
-                //Serial.println("Pressed");
-                //Serial.println(RX_Message[1]);
-                //Serial.println(RX_Message[2]);
-                //Serial.println(" ");
+                uint8_t octave = rxMsg[1];
+                uint32_t stepSize = stepSizes[rxMsg[2]];
+                uint32_t pitchAdjusted = stepSize << (octave - 4);
+                __atomic_store_n(&currentStepSize, pitchAdjusted, __ATOMIC_RELAXED);
+            }
+            else if (rxMsg[0] == 'R')
+            {
+                __atomic_store_n(&currentStepSize, 0, __ATOMIC_RELAXED);
             }
             else
+            {   
+                //Serial.println("Invalid message received");
+            }
+
+            // Update the RX_Message in sysState for display purposes
+            if (xSemaphoreTake(sysState.mutex, portMAX_DELAY) == pdTRUE)
             {
-                //Serial.println("Released");
+                memcpy(sysState.RX_Message, rxMsg, 8);
+                xSemaphoreGive(sysState.mutex);
             }
         }
+    }
+}
+
+void canTxTask(void *pvParameters)
+{
+    uint8_t txMsg[8];
+
+    while (1)
+    {
+        // Wait for a message from the TX queue
+        xQueueReceive(sysState.txQueue, txMsg, portMAX_DELAY);
+        xSemaphoreTake(sysState.CAN_TX_Semaphore, portMAX_DELAY);
+        CAN_TX(0x123, txMsg);
     }
 }
 /*----------------------------THE REST--------------------------------------------*/
@@ -507,7 +550,7 @@ void setup()
 
     // Initialise UART
     Serial.begin(9600);
-    Serial.println("Synthesizer with ISR-Safe Knob Class Started");
+    Serial.println("Synthesizer Started");
 
     // Initialize the keyboard
     setOutMuxBit(HKOE_BIT, HIGH); // Enable keyboard output
@@ -515,10 +558,23 @@ void setup()
     // Init CAN bus
     CAN_Init(true); // true for loopback, false for normal
     CAN_RegisterRX_ISR(CAN_RX_ISR); 
+    CAN_RegisterTX_ISR(CAN_TX_ISR);
     setCANFilter(0x123, 0x7ff);
     CAN_Start();
 
-    msgInQ = xQueueCreate(36, 8);
+    // Create queues
+    sysState.txQueue = xQueueCreate(100, 8); // Queue for outgoing messages
+    sysState.rxQueue = xQueueCreate(100, 8); // Queue for incoming messages
+
+    // Create semaphore
+    sysState.CAN_TX_Semaphore = xSemaphoreCreateCounting(3, 3);
+
+    if (sysState.txQueue == NULL || sysState.rxQueue == NULL || sysState.CAN_TX_Semaphore == NULL)
+    {
+        Serial.println("ERROR: CAN Queue or semaphore creation failed");
+        while (1)
+            ;
+    }
 
     // Create mutex
     sysState.mutex = xSemaphoreCreateMutex();
@@ -561,6 +617,14 @@ void setup()
         NULL,           // Parameters
         1,              // Priority
         &decodeTaskHandle);          // Task handle
+    
+    xTaskCreate(
+        canTxTask,     // Function to run
+        "canTx",       // Task name
+        128,            // Stack size in words 
+        NULL,           // Parameters
+        1,              // Priority
+        NULL);          // Task handle
 
     // Start the scheduler
     Serial.println("Starting FreeRTOS scheduler");
@@ -568,8 +632,6 @@ void setup()
 
     // Code should never reach here if scheduler starts properly
     Serial.println("ERROR: FreeRTOS scheduler failed to start");
-
-   
 
     while (1)
         ; // Infinite loop if scheduler fails
