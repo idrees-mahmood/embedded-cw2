@@ -59,6 +59,8 @@ const int HKOE_BIT = 6;
 
 // Global variable to store current step size
 volatile uint32_t currentStepSize = 0;
+volatile uint16_t localActiveNotes = 0;
+volatile uint16_t remoteActiveNotes = 0;
 
 // Global volatile variable for volume control
 // This will be accessed by both the ISR and the knob update task
@@ -109,8 +111,8 @@ public:
             if (newValue >= minValue && newValue <= maxValue)
             {
                 value = newValue;
-                //Serial.println("Knob " + rowIndex);
-                //Serial.println("Value: " + value);
+                // Serial.println("Knob " + rowIndex);
+                // Serial.println("Value: " + value);
 
                 return true; // Value was changed
             }
@@ -174,7 +176,7 @@ struct
         Knob(4, 0, 1, 0, 0, 15), // Knob 1: Row 4, cols 0,1, unused
         Knob(4, 2, 3, 0, 0, 15)  // Knob 0: Row 4, cols 2,3, unused
     };
-    uint8_t RX_Message[8]; // 
+    uint8_t RX_Message[8]; //
 } sysState;
 
 // Task handles
@@ -223,10 +225,32 @@ void setRow(uint8_t rowIdx)
 
 void sampleISR()
 {
-    static uint32_t phaseAcc = 0; // Phase accumulator, static (stores value between calls)
-    phaseAcc += currentStepSize;  // Increment phase
+    static uint32_t phaseAcc[12] = {0}; // Phase accumulator, static (stores value between calls)
+    uint16_t localActive = __atomic_load_n(&localActiveNotes, __ATOMIC_RELAXED);
+    uint16_t remoteActive = __atomic_load_n(&remoteActiveNotes, __ATOMIC_RELAXED);
+    uint16_t allActive = localActive | remoteActive;
 
-    int32_t Vout = (phaseAcc >> 24) - 128; // Convert to sawtooth waveform
+    int32_t Vout = 0;
+    int numActive = __builtin_popcount(allActive);
+
+    for (int i = 0; i < 12; i++)
+    {
+        if (allActive & (1 << i))
+        {
+            phaseAcc[i] += stepSizes[i];
+            // Vout += (int32_t)(sinLUT[(phaseAcc[i] >> 20) & 0x3ff]) * 127 / numActive;
+            Vout += (phaseAcc[i] >> 24) - 128; // Sawtooth wave
+        }
+    }
+
+    if (numActive > 0)
+    {
+        Vout /= numActive;
+    }
+    else
+    {
+        Vout = 0;
+    }
 
     // Use the global volumeControl variable - atomic and ISR-safe
     int8_t volume = __atomic_load_n(&volumeControl, __ATOMIC_RELAXED);
@@ -241,6 +265,9 @@ void sampleISR()
         Vout = 0;
     }
 
+    // Clamp output to 8-bit range
+    Vout = (Vout > 127) ? 127 : (Vout < -128) ? -128 : Vout;
+
     analogWrite(OUTR_PIN, Vout + 128);
     analogWrite(OUTL_PIN, Vout + 128); // Add output to left channel too
 }
@@ -252,7 +279,7 @@ void CAN_RX_ISR()
     while (CAN_CheckRXLevel())
     {
         CAN_RX(ID, RX_Message_ISR);
-        //l.println("CAN RX ISR triggered");
+        // l.println("CAN RX ISR triggered");
         xQueueSendFromISR(sysState.rxQueue, RX_Message_ISR, NULL);
     }
 }
@@ -373,10 +400,12 @@ void scanKeysTask(void *pvParameters)
     const TickType_t xFrequency = 10 / portTICK_PERIOD_MS;
     TickType_t xLastWakeTime = xTaskGetTickCount();
     uint8_t txMsg[8] = {0};
+    static uint16_t prevLocalActiveNotes = 0;
 
     while (1)
     {
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
+        uint16_t newLocalActiveNotes = 0;
         int lastKeyPressed = -1; // default: no key pressed
 
         // First scan knob rows (rows 3 and 4)
@@ -421,53 +450,40 @@ void scanKeysTask(void *pvParameters)
             delayMicroseconds(3);
             std::bitset<4> result = readCols();
 
-            if (xSemaphoreTake(sysState.mutex, portMAX_DELAY) == pdTRUE)
-            {
-                sysState.inputs = result.to_ulong();
-                xSemaphoreGive(sysState.mutex);
-            }
-
             for (uint8_t col = 0; col < 4; col++)
             {
                 int keyIndex = row * 4 + col;
                 if (keyIndex < 12 && !result[col])
-                {                              // Only check piano keys, active low logic
-                    lastKeyPressed = keyIndex; // Store this pressed key
+                { // Key pressed
+                    newLocalActiveNotes |= (1 << keyIndex);
                 }
             }
         }
 
-        // Update the step size based on the last pressed key
-        if (lastKeyPressed != -1)
+        // Detect note changes and send CAN messages
+        uint16_t pressed = newLocalActiveNotes & ~prevLocalActiveNotes;
+        uint16_t released = prevLocalActiveNotes & ~newLocalActiveNotes;
+
+        for (int i = 0; i < 12; i++)
         {
-            __atomic_store_n(&currentStepSize, stepSizes[lastKeyPressed], __ATOMIC_RELAXED);
-        }
-        else
-        {
-            __atomic_store_n(&currentStepSize, 0, __ATOMIC_RELAXED);
+            if (pressed & (1 << i))
+            {
+                txMsg[0] = 'P';
+                txMsg[1] = 4;
+                txMsg[2] = i;
+                xQueueSend(sysState.txQueue, txMsg, 0);
+            }
+            if (released & (1 << i))
+            {
+                txMsg[0] = 'R';
+                txMsg[1] = 4;
+                txMsg[2] = i;
+                xQueueSend(sysState.txQueue, txMsg, 0);
+            }
         }
 
-        // update the TX_Message
-        // TX_Message[0] indicates pressed or released ('P' or 'R')
-        // TX_Message[1] indicates the octave number (0-8)
-        // TX_Message[2] indicates the note number (0-11)
-
-        if (lastKeyPressed != -1)
-        {
-            txMsg[0] = 'P';
-            txMsg[1] = 4;
-            txMsg[2] = lastKeyPressed % 12;
-        }
-        else
-        {
-            txMsg[0] = 'R';
-        }
-
-        // Send the TX_Message
-        //Serial.println("Sending message");
-        
-        xQueueSend(sysState.txQueue, txMsg, 0); // Timeout - don't block if queue is full
-        //Serial.println("Message sent");
+        prevLocalActiveNotes = newLocalActiveNotes;
+        __atomic_store_n(&localActiveNotes, newLocalActiveNotes, __ATOMIC_RELAXED);
     }
 }
 
@@ -477,28 +493,20 @@ void decodeTask(void *pvParameters)
 
     while (1)
     {
-        // Wait for a message from the RX queue
         if (xQueueReceive(sysState.rxQueue, rxMsg, portMAX_DELAY) == pdTRUE)
         {
-            //l.println("Received message in decode task: ");
-            // Process the received message
             if (rxMsg[0] == 'P')
             {
-                uint8_t octave = rxMsg[1];
-                uint32_t stepSize = stepSizes[rxMsg[2]];
-                uint32_t pitchAdjusted = stepSize << (octave - 4);
-                __atomic_store_n(&currentStepSize, pitchAdjusted, __ATOMIC_RELAXED);
+                uint8_t note = rxMsg[2];
+                __atomic_fetch_or(&remoteActiveNotes, (1 << note), __ATOMIC_RELAXED);
             }
             else if (rxMsg[0] == 'R')
             {
-                __atomic_store_n(&currentStepSize, 0, __ATOMIC_RELAXED);
-            }
-            else
-            {   
-                //Serial.println("Invalid message received");
+                uint8_t note = rxMsg[2];
+                __atomic_fetch_and(&remoteActiveNotes, ~(1 << note), __ATOMIC_RELAXED);
             }
 
-            // Update the RX_Message in sysState for display purposes
+            // Update RX_Message for display
             if (xSemaphoreTake(sysState.mutex, portMAX_DELAY) == pdTRUE)
             {
                 memcpy(sysState.RX_Message, rxMsg, 8);
@@ -557,7 +565,7 @@ void setup()
 
     // Init CAN bus
     CAN_Init(true); // true for loopback, false for normal
-    CAN_RegisterRX_ISR(CAN_RX_ISR); 
+    CAN_RegisterRX_ISR(CAN_RX_ISR);
     CAN_RegisterTX_ISR(CAN_TX_ISR);
     setCANFilter(0x123, 0x7ff);
     CAN_Start();
@@ -611,20 +619,20 @@ void setup()
         &displayUpdateHandle); // Task handle
 
     xTaskCreate(
-        decodeTask,     // Function to run
-        "decode",       // Task name
-        128,            // Stack size in words 
-        NULL,           // Parameters
-        1,              // Priority
-        &decodeTaskHandle);          // Task handle
-    
+        decodeTask,         // Function to run
+        "decode",           // Task name
+        128,                // Stack size in words
+        NULL,               // Parameters
+        1,                  // Priority
+        &decodeTaskHandle); // Task handle
+
     xTaskCreate(
-        canTxTask,     // Function to run
-        "canTx",       // Task name
-        128,            // Stack size in words 
-        NULL,           // Parameters
-        1,              // Priority
-        NULL);          // Task handle
+        canTxTask, // Function to run
+        "canTx",   // Task name
+        128,       // Stack size in words
+        NULL,      // Parameters
+        1,         // Priority
+        NULL);     // Task handle
 
     // Start the scheduler
     Serial.println("Starting FreeRTOS scheduler");
