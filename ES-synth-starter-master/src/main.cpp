@@ -57,14 +57,14 @@ const int DRST_BIT = 4;
 const int HKOW_BIT = 5;
 const int HKOE_BIT = 6;
 
-// Global variable to store current step size
-volatile uint32_t currentStepSize = 0;
+// Global variable to store the notes
 volatile uint16_t localActiveNotes = 0;
 volatile uint16_t remoteActiveNotes = 0;
 
 // Global volatile variable for volume control
 // This will be accessed by both the ISR and the knob update task
 volatile int8_t volumeControl = 0;
+volatile int32_t pitchBend = 0;
 
 // Timer object
 HardwareTimer sampleTimer(TIM1);
@@ -165,7 +165,6 @@ const int8_t Knob::rotationTable[4][4] = {
 // Threading
 struct
 {
-    std::bitset<32> inputs;
     SemaphoreHandle_t mutex;
     QueueHandle_t txQueue;
     QueueHandle_t rxQueue;
@@ -229,15 +228,19 @@ void sampleISR()
     uint16_t localActive = __atomic_load_n(&localActiveNotes, __ATOMIC_RELAXED);
     uint16_t remoteActive = __atomic_load_n(&remoteActiveNotes, __ATOMIC_RELAXED);
     uint16_t allActive = localActive | remoteActive;
+    
+    int32_t pitch = __atomic_load_n(&pitchBend, __ATOMIC_RELAXED);
 
     int32_t Vout = 0;
     int numActive = __builtin_popcount(allActive);
 
+    //Serial.println(pitch);
     for (int i = 0; i < 12; i++)
     {
         if (allActive & (1 << i))
         {
-            phaseAcc[i] += stepSizes[i];
+            
+            phaseAcc[i] += stepSizes[i] + pitch;
             // Vout += (int32_t)(sinLUT[(phaseAcc[i] >> 20) & 0x3ff]) * 127 / numActive;
             Vout += (phaseAcc[i] >> 24) - 128; // Sawtooth wave
         }
@@ -254,6 +257,7 @@ void sampleISR()
 
     // Use the global volumeControl variable - atomic and ISR-safe
     int8_t volume = __atomic_load_n(&volumeControl, __ATOMIC_RELAXED);
+    
 
     // Apply volume control by bit-shifting (with bounds checking)
     if (volume > 0 && volume < 8)
@@ -301,23 +305,6 @@ void displayUpdateTask(void *pvParameters)
     {
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
 
-        // Determine which note name to display based on currentStepSize
-        uint32_t stepSize = __atomic_load_n(&currentStepSize, __ATOMIC_RELAXED);
-
-        const char *pressedKey = "None";
-        if (stepSize > 0)
-        {
-            // Find which note matches the current step size
-            for (int i = 0; i < 12; i++)
-            {
-                if (stepSize == stepSizes[i])
-                {
-                    pressedKey = noteNames[i];
-                    break;
-                }
-            }
-        }
-
         // Get volume value directly from the atomic global
         int8_t volume = __atomic_load_n(&volumeControl, __ATOMIC_RELAXED);
 
@@ -333,7 +320,7 @@ void displayUpdateTask(void *pvParameters)
         u8g2.setFont(u8g2_font_ncenB08_tr);   // choose a suitable font
         u8g2.drawStr(2, 10, "Pressed key: "); // write something to the internal memory
         u8g2.setCursor(75, 10);
-        u8g2.print(pressedKey);
+        u8g2.print(noteNames[localRxMessage[2]]);
 
         u8g2.setCursor(2, 20);
         u8g2.print("Volume: ");
@@ -369,28 +356,6 @@ void displayUpdateTask(void *pvParameters)
 
         // Toggle LED for visual feedback
         digitalToggle(LED_BUILTIN);
-    }
-}
-
-// Task to update volume control value
-void updateVolumeTask(void *pvParameters)
-{
-    const TickType_t xFrequency = 5 / portTICK_PERIOD_MS; // More frequent updates for responsive volume control
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-
-    while (1)
-    {
-        vTaskDelayUntil(&xLastWakeTime, xFrequency);
-
-        // Safely get the volume value from the knob object
-        if (xSemaphoreTake(sysState.mutex, portMAX_DELAY) == pdTRUE)
-        {
-            int8_t newVolume = sysState.knobs[0].getValue();
-            xSemaphoreGive(sysState.mutex);
-
-            // Update the atomic volume control variable
-            __atomic_store_n(&volumeControl, newVolume, __ATOMIC_RELAXED);
-        }
     }
 }
 
@@ -459,6 +424,29 @@ void scanKeysTask(void *pvParameters)
                 }
             }
         }
+
+        int32_t freqOffset = 0;
+        // Scan joystick to apply pitch bend
+        int joyX = analogRead(JOYX_PIN);
+        // joyX reads min 18 max 1024
+        // deadzone is around 477 so set deadzone to 400-550
+        int joyY = analogRead(JOYY_PIN);
+        
+        //Serial.println(joyX);
+        // Apply pitch bend to the notes
+        if (joyX > 550 || joyX < 400)
+        {
+            freqOffset = map(joyX, 0, 1024, 3000000, -3000000);
+        }
+        else
+        {
+            freqOffset = 0;
+        }
+        //Serial.println("Freq offset: ");
+        //Serial.println(freqOffset);
+
+        __atomic_store_n(&pitchBend, freqOffset, __ATOMIC_RELAXED);
+
 
         // Detect note changes and send CAN messages
         uint16_t pressed = newLocalActiveNotes & ~prevLocalActiveNotes;
