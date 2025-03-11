@@ -57,6 +57,8 @@ const int DRST_BIT = 4;
 const int HKOW_BIT = 5;
 const int HKOE_BIT = 6;
 
+// Global variables
+
 // Global variable to store the notes
 volatile uint16_t localActiveNotes = 0;
 volatile uint16_t remoteActiveNotes = 0;
@@ -66,13 +68,30 @@ volatile uint16_t remoteActiveNotes = 0;
 volatile int8_t volumeControl = 0;
 volatile int32_t pitchBend = 0;
 
+// Audio buffer configuration
+constexpr uint32_t AUDIO_BUFFER_SIZE = 256; // 11.6 ms at 22050 Hz
+static int16_t audioBuffer0[AUDIO_BUFFER_SIZE] = {0};
+static int16_t audioBuffer1[AUDIO_BUFFER_SIZE] = {0};
+volatile int16_t *activeBuffer = audioBuffer0;
+volatile uint32_t bufferPosition = 0;
+
+struct ReverbState
+{
+    SemaphoreHandle_t mutex;
+    static constexpr uint32_t DELAY_SAMPLES = 2200;
+    float feedback = 0.0f;
+    int16_t delayBuffer[DELAY_SAMPLES] = {0};
+    uint32_t writeIndex = 0;
+} reverb;
+// atomic access, may consider mutex
+
 // Timer object
 HardwareTimer sampleTimer(TIM1);
 
 // Display driver object
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
 
-/*------------------------------------------------------------------------------------------*/
+/*--------------------------------------Helper Functions----------------------------------------------------*/
 
 // Knob class definition for managing rotary encoders
 class Knob
@@ -171,7 +190,7 @@ struct
     SemaphoreHandle_t CAN_TX_Semaphore;
     Knob knobs[4] = {
         Knob(3, 0, 1, 0, 0, 7),  // Knob 3: Row 3, cols 0,1, volume control (0-7)
-        Knob(3, 2, 3, 0, 0, 15), // Knob 2: Row 3, cols 2,3, unused
+        Knob(3, 2, 3, 0, 0, 15), // Knob 2: Row 3, cols 2,3, reverb decay (0-15)
         Knob(4, 0, 1, 0, 0, 15), // Knob 1: Row 4, cols 0,1, unused
         Knob(4, 2, 3, 0, 0, 15)  // Knob 0: Row 4, cols 2,3, unused
     };
@@ -220,28 +239,17 @@ void setRow(uint8_t rowIdx)
     digitalWrite(REN_PIN, HIGH);
 }
 
-/*------------------------------ISRs-------------------------------------------*/
-
-void sampleISR()
+int32_t generateSawtooth(uint16_t activeNotes)
 {
     static uint32_t phaseAcc[12] = {0}; // Phase accumulator, static (stores value between calls)
-    uint16_t localActive = __atomic_load_n(&localActiveNotes, __ATOMIC_RELAXED);
-    uint16_t remoteActive = __atomic_load_n(&remoteActiveNotes, __ATOMIC_RELAXED);
-    uint16_t allActive = localActive | remoteActive;
-    
-    int32_t pitch = __atomic_load_n(&pitchBend, __ATOMIC_RELAXED);
-
     int32_t Vout = 0;
-    int numActive = __builtin_popcount(allActive);
+    int numActive = __builtin_popcount(activeNotes);
 
-    //Serial.println(pitch);
     for (int i = 0; i < 12; i++)
     {
-        if (allActive & (1 << i))
+        if (activeNotes & (1 << i))
         {
-            
-            phaseAcc[i] += stepSizes[i] + pitch;
-            // Vout += (int32_t)(sinLUT[(phaseAcc[i] >> 20) & 0x3ff]) * 127 / numActive;
+            phaseAcc[i] += stepSizes[i];
             Vout += (phaseAcc[i] >> 24) - 128; // Sawtooth wave
         }
     }
@@ -255,25 +263,48 @@ void sampleISR()
         Vout = 0;
     }
 
-    // Use the global volumeControl variable - atomic and ISR-safe
-    int8_t volume = __atomic_load_n(&volumeControl, __ATOMIC_RELAXED);
-    
+    return Vout;
+}
 
-    // Apply volume control by bit-shifting (with bounds checking)
-    if (volume > 0 && volume < 8)
+int32_t applyReverb(int32_t drySample, float feedback)
+{
+
+    xSemaphoreTake(reverb.mutex, portMAX_DELAY);
+
+    uint32_t readIndex = (reverb.writeIndex + ReverbState::DELAY_SAMPLES - 
+        (ReverbState::DELAY_SAMPLES % ReverbState::DELAY_SAMPLES)) % 
+        ReverbState::DELAY_SAMPLES;
+
+    int32_t delayedSample = reverb.delayBuffer[readIndex];
+
+    int32_t wet = (delayedSample * feedback);
+
+    //low pass filter
+    static int32_t lastOutput = 0;
+    wet = (wet + lastOutput) / 2;
+    lastOutput = wet;
+
+    int32_t output = wet * 0.7 + drySample;
+
+    reverb.writeIndex = (reverb.writeIndex + 1) % ReverbState::DELAY_SAMPLES;
+
+    xSemaphoreGive(reverb.mutex);
+
+    return output;
+}
+
+/*------------------------------ISRs-------------------------------------------*/
+
+void sampleISR()
+{
+    uint32_t pos = __atomic_load_n(&bufferPosition, __ATOMIC_RELAXED);
+    if (pos < AUDIO_BUFFER_SIZE)
     {
-        Vout = Vout >> (8 - volume);
-    }
-    else
-    {
-        Vout = 0;
-    }
+        int16_t sample = activeBuffer[pos];
+        __atomic_store_n(&bufferPosition, pos + 1, __ATOMIC_RELAXED);
 
-    // Clamp output to 8-bit range
-    Vout = (Vout > 127) ? 127 : (Vout < -128) ? -128 : Vout;
-
-    analogWrite(OUTR_PIN, Vout + 128);
-    analogWrite(OUTL_PIN, Vout + 128); // Add output to left channel too
+        analogWrite(OUTR_PIN, (uint8_t)(sample + 128));
+    }
 }
 
 void CAN_RX_ISR()
@@ -400,6 +431,15 @@ void scanKeysTask(void *pvParameters)
                         // Update the atomic volume control variable
                         __atomic_store_n(&volumeControl, newVolume, __ATOMIC_RELAXED);
                     }
+                    else if (k == 1 && changed)
+                    {
+                        int8_t decayValue = sysState.knobs[1].getValue();
+                        xSemaphoreGive(sysState.mutex);
+                        xSemaphoreTake(reverb.mutex, portMAX_DELAY);
+                        float feedback = decayValue / 15.0f * 0.9f; // 0-15 -> 0.0-0.9
+                        reverb.feedback = feedback;
+                        xSemaphoreGive(reverb.mutex);
+                    }
                     else
                     {
                         xSemaphoreGive(sysState.mutex);
@@ -425,15 +465,17 @@ void scanKeysTask(void *pvParameters)
             }
         }
 
+        // Apply pitch bend to the notes
+
         int32_t freqOffset = 0;
         // Scan joystick to apply pitch bend
         int joyX = analogRead(JOYX_PIN);
         // joyX reads min 18 max 1024
         // deadzone is around 477 so set deadzone to 400-550
         int joyY = analogRead(JOYY_PIN);
-        
-        //Serial.println(joyX);
-        // Apply pitch bend to the notes
+
+        // Serial.println(joyX);
+        //  Apply pitch bend to the notes
         if (joyX > 550 || joyX < 400)
         {
             freqOffset = map(joyX, 0, 1024, 3000000, -3000000);
@@ -442,11 +484,10 @@ void scanKeysTask(void *pvParameters)
         {
             freqOffset = 0;
         }
-        //Serial.println("Freq offset: ");
-        //Serial.println(freqOffset);
+        // Serial.println("Freq offset: ");
+        // Serial.println(freqOffset);
 
         __atomic_store_n(&pitchBend, freqOffset, __ATOMIC_RELAXED);
-
 
         // Detect note changes and send CAN messages
         uint16_t pressed = newLocalActiveNotes & ~prevLocalActiveNotes;
@@ -516,6 +557,58 @@ void canTxTask(void *pvParameters)
         CAN_TX(0x123, txMsg);
     }
 }
+
+void audioProcessingTask(void *pvParameters)
+{
+    const TickType_t xBufferDuration = pdMS_TO_TICKS(11.6); // ~11.6ms for 256 samples @22kHz
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    int16_t *workingBuffer = audioBuffer0;
+
+    while (1)
+    {
+        // Generate samples for the entire buffer
+        for (uint32_t i = 0; i < AUDIO_BUFFER_SIZE; ++i)
+        {
+            uint16_t allActive = __atomic_load_n(&localActiveNotes, __ATOMIC_RELAXED) |
+                                 __atomic_load_n(&remoteActiveNotes, __ATOMIC_RELAXED);
+            int32_t Vout = generateSawtooth(allActive);
+
+            // Apply pitch bend
+            Vout += __atomic_load_n(&pitchBend, __ATOMIC_RELAXED);
+
+            // Apply reverb
+            float feedback;
+            xSemaphoreTake(reverb.mutex, portMAX_DELAY);
+            feedback = reverb.feedback;
+            xSemaphoreGive(reverb.mutex);
+            Vout = applyReverb(Vout, feedback);
+
+            // Apply volume
+            int8_t volume = __atomic_load_n(&volumeControl, __ATOMIC_RELAXED);
+            Vout = (volume >= 0 && volume <= 7) ? Vout >> (7 - volume) : 0;
+
+            workingBuffer[i] = static_cast<int16_t>(Vout);
+        }
+
+        // Switch buffers atomically
+        portENTER_CRITICAL();
+        if (workingBuffer == audioBuffer0)
+        {
+            activeBuffer = (volatile int16_t *)audioBuffer0;
+            workingBuffer = audioBuffer1;
+        }
+        else
+        {
+            activeBuffer = (volatile int16_t *)audioBuffer1;
+            workingBuffer = audioBuffer0;
+        }
+        bufferPosition = 0; // Reset ISR's buffer position
+        portEXIT_CRITICAL();
+
+        // Delay until the next buffer period starts
+        vTaskDelayUntil(&xLastWakeTime, xBufferDuration);
+    }
+}
 /*----------------------------THE REST--------------------------------------------*/
 
 void setup()
@@ -581,8 +674,20 @@ void setup()
             ;
     }
 
-    // Initialize volume control with default value
+    // Initialize reverb state
+    reverb.mutex = xSemaphoreCreateMutex();
+    if (reverb.mutex == NULL)
+    {
+        Serial.println("ERROR: Reverb mutex creation failed");
+        while (1)
+            ;
+    }
+
+    // Initialize global variables
     __atomic_store_n(&volumeControl, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&pitchBend, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&activeBuffer, (volatile int16_t *)audioBuffer0, __ATOMIC_RELAXED);
+    __atomic_store_n(&bufferPosition, 0, __ATOMIC_RELAXED);
 
     // Timer and interrupt set up - do this AFTER initializing volume control
     sampleTimer.setOverflow(22000, HERTZ_FORMAT);
@@ -607,12 +712,13 @@ void setup()
         &displayUpdateHandle); // Task handle
 
     xTaskCreate(
-        decodeTask,         // Function to run
-        "decode",           // Task name
-        128,                // Stack size in words
-        NULL,               // Parameters
-        1,                  // Priority
-        &decodeTaskHandle); // Task handle
+        decodeTask,       // Function to run
+        "decode",         // Task name
+        128,              // Stack size in words
+        NULL,             // Parameters
+        1,                // Priority
+        &decodeTaskHandle // Task handle
+    );
 
     xTaskCreate(
         canTxTask, // Function to run
@@ -620,7 +726,16 @@ void setup()
         128,       // Stack size in words
         NULL,      // Parameters
         1,         // Priority
-        NULL);     // Task handle
+        NULL       // Task handle
+    );
+
+    xTaskCreate(
+        audioProcessingTask, // Function to run
+        "AudioProcess",
+        2048, // to account for the audio buffer
+        NULL,
+        2, // Higher priority than the other tasks
+        NULL);
 
     // Start the scheduler
     Serial.println("Starting FreeRTOS scheduler");
