@@ -242,6 +242,7 @@ void setRow(uint8_t rowIdx)
 int32_t generateSawtooth(uint16_t activeNotes)
 {
     static uint32_t phaseAcc[12] = {0}; // Phase accumulator, static (stores value between calls)
+    static int32_t lastVout = 0;
     int32_t Vout = 0;
     int numActive = __builtin_popcount(activeNotes);
 
@@ -263,34 +264,44 @@ int32_t generateSawtooth(uint16_t activeNotes)
         Vout = 0;
     }
 
+    // Apply low pass filter
+    Vout = (Vout * 0.7) + (lastVout * 0.3);
+    lastVout = Vout;
+
     return Vout;
 }
 
 int32_t applyReverb(int32_t drySample, float feedback)
 {
-
+    //return drySample;
+    if (feedback < 0.01f) return drySample; // Skip processing if reverb is off
+    
     xSemaphoreTake(reverb.mutex, portMAX_DELAY);
-
-    uint32_t readIndex = (reverb.writeIndex + ReverbState::DELAY_SAMPLES - 
-        (ReverbState::DELAY_SAMPLES % ReverbState::DELAY_SAMPLES)) % 
-        ReverbState::DELAY_SAMPLES;
-
+    
+    // Safe calculation of read index
+    uint32_t readIndex = reverb.writeIndex;
+    if (readIndex < ReverbState::DELAY_SAMPLES) {
+        readIndex = ReverbState::DELAY_SAMPLES - readIndex;
+        readIndex = ReverbState::DELAY_SAMPLES - readIndex; // Wrap around properly
+    } else {
+        readIndex = readIndex - ReverbState::DELAY_SAMPLES;
+    }
+    
+    // Read delayed sample
     int32_t delayedSample = reverb.delayBuffer[readIndex];
-
-    int32_t wet = (delayedSample * feedback);
-
-    //low pass filter
-    static int32_t lastOutput = 0;
-    wet = (wet + lastOutput) / 2;
-    lastOutput = wet;
-
-    int32_t output = wet * 0.7 + drySample;
-
+    
+    // Calculate wet signal with feedback
+    int32_t wet = delayedSample * feedback;
+    
+    // Store new sample in delay buffer
+    reverb.delayBuffer[reverb.writeIndex] = drySample + (wet / 2); // Reduce feedback amount
+    
+    // Update write index with wrap-around
     reverb.writeIndex = (reverb.writeIndex + 1) % ReverbState::DELAY_SAMPLES;
-
+    
     xSemaphoreGive(reverb.mutex);
-
-    return output;
+    
+    return drySample + wet; // Mix dry and wet
 }
 
 /*------------------------------ISRs-------------------------------------------*/
@@ -591,18 +602,18 @@ void audioProcessingTask(void *pvParameters)
         }
 
         // Switch buffers atomically
+        // Attempt to implement a crossfade effect
+       
+        // Ensure buffer position is properly reset
         portENTER_CRITICAL();
-        if (workingBuffer == audioBuffer0)
-        {
-            activeBuffer = (volatile int16_t *)audioBuffer0;
+        if (workingBuffer == audioBuffer0) {
+            activeBuffer = audioBuffer0;  // Remove casting to avoid any issues
             workingBuffer = audioBuffer1;
-        }
-        else
-        {
-            activeBuffer = (volatile int16_t *)audioBuffer1;
+        } else {
+            activeBuffer = audioBuffer1;  // Remove casting to avoid any issues
             workingBuffer = audioBuffer0;
         }
-        bufferPosition = 0; // Reset ISR's buffer position
+        bufferPosition = 0;  // Reset buffer position
         portEXIT_CRITICAL();
 
         // Delay until the next buffer period starts
