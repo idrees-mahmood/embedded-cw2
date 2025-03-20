@@ -1,7 +1,3 @@
-#include "stm32l4xx_hal.h"
-#include "stm32l4xx_hal_rcc_ex.h"
-#include "stm32l4xx_hal_rcc.h"
-#include "stm32l4xx_hal_can.h"
 #include <Arduino.h>
 #include <U8g2lib.h>
 #include <bitset>
@@ -9,291 +5,143 @@
 #include <STM32FreeRTOS.h>
 #include <ES_CAN.h>
 
-// Constants
-const uint32_t interval = 100; // Display update interval
-const uint32_t f0 = 440;       // Reference frequency (A4 = 440 Hz)
-const uint32_t fs = 22000;     // Sample rate
+// STM32 HAL includes
+#include "stm32l4xx_hal.h"
+#include "stm32l4xx_hal_rcc_ex.h"
+#include "stm32l4xx_hal_rcc.h"
+#include "stm32l4xx_hal_can.h"
 
-const char *noteNames[12] = {"C", "C#", "D", "D#", "E", "F",
-                             "F#", "G", "G#", "A", "A#", "B"};
+// Project-specific includes
+#include "waveform.h"
 
-// Base step sizes for octave 0
-const uint32_t stepSizes[12] = {
-    (uint32_t)((pow(2.0, (0.0 / 12.0)) * f0 / fs) * pow(2.0, 32)),  // C
-    (uint32_t)((pow(2.0, (1.0 / 12.0)) * f0 / fs) * pow(2.0, 32)),  // C#
-    (uint32_t)((pow(2.0, (2.0 / 12.0)) * f0 / fs) * pow(2.0, 32)),  // D
-    (uint32_t)((pow(2.0, (3.0 / 12.0)) * f0 / fs) * pow(2.0, 32)),  // D#
-    (uint32_t)((pow(2.0, (4.0 / 12.0)) * f0 / fs) * pow(2.0, 32)),  // E
-    (uint32_t)((pow(2.0, (5.0 / 12.0)) * f0 / fs) * pow(2.0, 32)),  // F
-    (uint32_t)((pow(2.0, (6.0 / 12.0)) * f0 / fs) * pow(2.0, 32)),  // F#
-    (uint32_t)((pow(2.0, (7.0 / 12.0)) * f0 / fs) * pow(2.0, 32)),  // G
-    (uint32_t)((pow(2.0, (8.0 / 12.0)) * f0 / fs) * pow(2.0, 32)),  // G#
-    (uint32_t)((pow(2.0, (9.0 / 12.0)) * f0 / fs) * pow(2.0, 32)),  // A
-    (uint32_t)((pow(2.0, (10.0 / 12.0)) * f0 / fs) * pow(2.0, 32)), // A#
-    (uint32_t)((pow(2.0, (11.0 / 12.0)) * f0 / fs) * pow(2.0, 32))  // B
-};
+// Debug flags (comment out to disable)
+#define TEST_SCAN_KEYS
+#define TEST_DISPLAY
+#define TEST_DECODE
+#define TEST_CAN_TX
 
-
-// Waveform Generation
-
-//Use LUT cause its easier
-const int LUT_SIZE = 216;
-
-int8_t sineLUT[LUT_SIZE];
-int8_t sawtoothLUT[LUT_SIZE];
-int8_t triangleLUT[LUT_SIZE];
-int8_t squareLUT[LUT_SIZE];
-
-// Define waveform types as a scoped enum for better type safety
-enum class Waveform : uint8_t {
-    SINE = 0,
-    SAWTOOTH = 1,
-    TRIANGLE = 2,
-    SQUARE = 3,
-    WAVEFORM_COUNT = 4
-};
-
-// Helper function to convert Waveform to uint8_t
-inline uint8_t waveformToUint8(Waveform w) {
-    return static_cast<uint8_t>(w);
-}
-
-// default wave
-volatile uint8_t currentWaveform = waveformToUint8(Waveform::SAWTOOTH);
-
-volatile int8_t octaveShift = 0;
-
-const int8_t sineLUT[512] = {
-    0, 1, 3, 4, 6, 7, 9, 10, 12, 13, 15, 17, 18, 20, 21, 23,
-    24, 26, 27, 29, 30, 32, 33, 35, 36, 38, 39, 41, 42, 44, 45, 47,
-    48, 50, 51, 52, 54, 55, 57, 58, 59, 61, 62, 63, 65, 66, 67, 69,
-    70, 71, 73, 74, 75, 76, 78, 79, 80, 81, 82, 84, 85, 86, 87, 88,
-    89, 90, 91, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 102, 103, 104,
-    105, 106, 107, 108, 108, 109, 110, 111, 112, 112, 113, 114, 114, 115, 116, 116,
-    117, 117, 118, 119, 119, 120, 120, 121, 121, 121, 122, 122, 123, 123, 123, 124,
-    124, 124, 125, 125, 125, 125, 126, 126, 126, 126, 126, 126, 126, 126, 126, 126,
-    127, 126, 126, 126, 126, 126, 126, 126, 126, 126, 126, 125, 125, 125, 125, 124,
-    124, 124, 123, 123, 123, 122, 122, 121, 121, 121, 120, 120, 119, 119, 118, 117,
-    117, 116, 116, 115, 114, 114, 113, 112, 112, 111, 110, 109, 108, 108, 107, 106,
-    105, 104, 103, 102, 102, 101, 100, 99, 98, 97, 96, 95, 94, 93, 91, 90,
-    89, 88, 87, 86, 85, 84, 82, 81, 80, 79, 78, 76, 75, 74, 73, 71,
-    70, 69, 67, 66, 65, 63, 62, 61, 59, 58, 57, 55, 54, 52, 51, 50,
-    48, 47, 45, 44, 42, 41, 39, 38, 36, 35, 33, 32, 30, 29, 27, 26,
-    24, 23, 21, 20, 18, 17, 15, 13, 12, 10, 9, 7, 6, 4, 3, 1,
-    0, -1, -3, -4, -6, -7, -9, -10, -12, -13, -15, -17, -18, -20, -21, -23,
-    -24, -26, -27, -29, -30, -32, -33, -35, -36, -38, -39, -41, -42, -44, -45, -47,
-    -48, -50, -51, -52, -54, -55, -57, -58, -59, -61, -62, -63, -65, -66, -67, -69,
-    -70, -71, -73, -74, -75, -76, -78, -79, -80, -81, -82, -84, -85, -86, -87, -88,
-    -89, -90, -91, -93, -94, -95, -96, -97, -98, -99, -100, -101, -102, -102, -103, -104,
-    -105, -106, -107, -108, -108, -109, -110, -111, -112, -112, -113, -114, -114, -115, -116, -116,
-    -117, -117, -118, -119, -119, -120, -120, -121, -121, -121, -122, -122, -123, -123, -123, -124,
-    -124, -124, -125, -125, -125, -125, -126, -126, -126, -126, -126, -126, -126, -126, -126, -126,
-    -127, -126, -126, -126, -126, -126, -126, -126, -126, -126, -126, -125, -125, -125, -125, -124,
-    -124, -124, -123, -123, -123, -122, -122, -121, -121, -121, -120, -120, -119, -119, -118, -117,
-    -117, -116, -116, -115, -114, -114, -113, -112, -112, -111, -110, -109, -108, -108, -107, -106,
-    -105, -104, -103, -102, -102, -101, -100, -99, -98, -97, -96, -95, -94, -93, -91, -90,
-    -89, -88, -87, -86, -85, -84, -82, -81, -80, -79, -78, -76, -75, -74, -73, -71,
-    -70, -69, -67, -66, -65, -63, -62, -61, -59, -58, -57, -55, -54, -52, -51, -50,
-    -48, -47, -45, -44, -42, -41, -39, -38, -36, -35, -33, -32, -30, -29, -27, -26,
-    -24, -23, -21, -20, -18, -17, -15, -13, -12, -10, -9, -7, -6, -4, -3, -1,
-};
-
-const int8_t sawtoothLUT[512] = {
-    -127, -126, -126, -125, -125, -124, -124, -123, -123, -122, -122, -121, -121, -120, -120, -119,
-    -119, -118, -118, -117, -117, -116, -116, -115, -115, -114, -114, -113, -113, -112, -112, -111,
-    -111, -110, -110, -109, -109, -108, -108, -107, -107, -106, -106, -105, -105, -104, -104, -103,
-    -103, -102, -102, -101, -101, -100, -100, -99, -99, -98, -98, -97, -97, -96, -96, -95,
-    -95, -94, -94, -93, -93, -92, -92, -91, -91, -90, -90, -89, -89, -88, -88, -87,
-    -87, -86, -86, -85, -85, -84, -84, -83, -83, -82, -82, -81, -81, -80, -80, -79,
-    -79, -78, -78, -77, -77, -76, -76, -75, -75, -74, -74, -73, -73, -72, -72, -71,
-    -71, -70, -70, -69, -69, -68, -68, -67, -67, -66, -66, -65, -65, -64, -64, -63,
-    -63, -62, -62, -61, -61, -60, -60, -59, -59, -58, -58, -57, -57, -56, -56, -55,
-    -55, -54, -54, -53, -53, -52, -52, -51, -51, -50, -50, -49, -49, -48, -48, -47,
-    -47, -46, -46, -45, -45, -44, -44, -43, -43, -42, -42, -42, -41, -41, -40, -40,
-    -39, -39, -38, -38, -37, -37, -36, -36, -35, -35, -34, -34, -33, -33, -32, -32,
-    -31, -31, -30, -30, -29, -29, -28, -28, -27, -27, -26, -26, -25, -25, -24, -24,
-    -23, -23, -22, -22, -21, -21, -20, -20, -19, -19, -18, -18, -17, -17, -16, -16,
-    -15, -15, -14, -14, -13, -13, -12, -12, -11, -11, -10, -10, -9, -9, -8, -8,
-    -7, -7, -6, -6, -5, -5, -4, -4, -3, -3, -2, -2, -1, -1, 0, 0,
-    0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7,
-    8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15,
-    16, 16, 17, 17, 18, 18, 19, 19, 20, 20, 21, 21, 22, 22, 23, 23,
-    24, 24, 25, 25, 26, 26, 27, 27, 28, 28, 29, 29, 30, 30, 31, 31,
-    32, 32, 33, 33, 34, 34, 35, 35, 36, 36, 37, 37, 38, 38, 39, 39,
-    40, 40, 41, 41, 42, 42, 42, 43, 43, 44, 44, 45, 45, 46, 46, 47,
-    47, 48, 48, 49, 49, 50, 50, 51, 51, 52, 52, 53, 53, 54, 54, 55,
-    55, 56, 56, 57, 57, 58, 58, 59, 59, 60, 60, 61, 61, 62, 62, 63,
-    63, 64, 64, 65, 65, 66, 66, 67, 67, 68, 68, 69, 69, 70, 70, 71,
-    71, 72, 72, 73, 73, 74, 74, 75, 75, 76, 76, 77, 77, 78, 78, 79,
-    79, 80, 80, 81, 81, 82, 82, 83, 83, 84, 84, 85, 85, 86, 86, 87,
-    87, 88, 88, 89, 89, 90, 90, 91, 91, 92, 92, 93, 93, 94, 94, 95,
-    95, 96, 96, 97, 97, 98, 98, 99, 99, 100, 100, 101, 101, 102, 102, 103,
-    103, 104, 104, 105, 105, 106, 106, 107, 107, 108, 108, 109, 109, 110, 110, 111,
-    111, 112, 112, 113, 113, 114, 114, 115, 115, 116, 116, 117, 117, 118, 118, 119,
-    119, 120, 120, 121, 121, 122, 122, 123, 123, 124, 124, 125, 125, 126, 126, 127,
-};
-
-const int8_t triangleLUT[512] = {
-    -127, -126, -125, -124, -123, -122, -121, -120, -119, -118, -117, -116, -115, -114, -113, -112,
-    -111, -110, -109, -108, -107, -106, -105, -104, -103, -102, -101, -100, -99, -98, -97, -96,
-    -95, -94, -93, -92, -91, -90, -89, -88, -87, -86, -85, -84, -83, -82, -81, -80,
-    -79, -78, -77, -76, -75, -74, -73, -72, -71, -70, -69, -68, -67, -66, -65, -64,
-    -63, -62, -61, -60, -59, -58, -57, -56, -55, -54, -53, -52, -51, -50, -49, -48,
-    -47, -46, -45, -44, -43, -42, -41, -40, -39, -38, -37, -36, -35, -34, -33, -32,
-    -31, -30, -29, -28, -27, -26, -25, -24, -23, -22, -21, -20, -19, -18, -17, -16,
-    -15, -14, -13, -12, -11, -10, -9, -8, -7, -6, -5, -4, -3, -2, -1, 0,
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-    16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
-    32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
-    48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
-    64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79,
-    80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
-    96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111,
-    112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127,
-    127, 126, 125, 124, 123, 122, 121, 120, 119, 118, 117, 116, 115, 114, 113, 112,
-    111, 110, 109, 108, 107, 106, 105, 104, 103, 102, 101, 100, 99, 98, 97, 96,
-    95, 94, 93, 92, 91, 90, 89, 88, 87, 86, 85, 84, 83, 82, 81, 80,
-    79, 78, 77, 76, 75, 74, 73, 72, 71, 70, 69, 68, 67, 66, 65, 64,
-    63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48,
-    47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 32,
-    31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16,
-    15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
-    0, -1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14, -15,
-    -16, -17, -18, -19, -20, -21, -22, -23, -24, -25, -26, -27, -28, -29, -30, -31,
-    -32, -33, -34, -35, -36, -37, -38, -39, -40, -41, -42, -43, -44, -45, -46, -47,
-    -48, -49, -50, -51, -52, -53, -54, -55, -56, -57, -58, -59, -60, -61, -62, -63,
-    -64, -65, -66, -67, -68, -69, -70, -71, -72, -73, -74, -75, -76, -77, -78, -79,
-    -80, -81, -82, -83, -84, -85, -86, -87, -88, -89, -90, -91, -92, -93, -94, -95,
-    -96, -97, -98, -99, -100, -101, -102, -103, -104, -105, -106, -107, -108, -109, -110, -111,
-    -112, -113, -114, -115, -116, -117, -118, -119, -120, -121, -122, -123, -124, -125, -126, -127,
-};
-
-const int8_t squareLUT[256] = {
-    127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127,
-    127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127,
-    127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127,
-    127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127,
-    127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127,
-    127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127,
-    127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127,
-    127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127,
-    -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127,
-    -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127,
-    -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127,
-    -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127,
-    -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127,
-    -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127,
-    -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127,
-    -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127,
-};
-
-void initWaveformLUTs() {
-    // Initialize sine wave LUT
-    for (int i = 0; i < LUT_SIZE; i++) {
-        // Convert to range -127 to 127
-        sineLUT[i] = (int8_t)(127.0f * sin(2.0f * PI * i / LUT_SIZE));
-    }
-    
-    // Initialize sawtooth wave LUT
-    for (int i = 0; i < LUT_SIZE; i++) {
-        // Properly scale from -127 to 127 across LUT_SIZE
-        sawtoothLUT[i] = (int8_t)(-127 + (2 * 127 * i) / (LUT_SIZE - 1));
-    }
-    
-    // Initialize triangle wave LUT
-    for (int i = 0; i < LUT_SIZE; i++) {
-        // First half rises from -127 to 127
-        if (i < LUT_SIZE / 2) {
-            triangleLUT[i] = (int8_t)(-127 + (2 * 127 * i) / (LUT_SIZE / 2 - 1));
-        } 
-        // Second half falls from 127 to -127
-        else {
-            triangleLUT[i] = (int8_t)(127 - (2 * 127 * (i - LUT_SIZE / 2)) / (LUT_SIZE / 2 - 1));
-        }
-    }
-    
-    for (int i = 0; i < LUT_SIZE; i++) {
-        squareLUT[i] = (i < LUT_SIZE / 2) ? 127 : -127;
-    }
-}
+//----------------------
+// Hardware configuration
+//----------------------
 
 // Pin definitions
-// Row select and enable
-const int RA0_PIN = D3;
-const int RA1_PIN = D6;
-const int RA2_PIN = D12;
-const int REN_PIN = A5;
+struct Pins
+{
+    // Row select and enable
+    static const int RA0 = D3;
+    static const int RA1 = D6;
+    static const int RA2 = D12;
+    static const int REN = A5;
 
-// Matrix input and output
-const int C0_PIN = A2;
-const int C1_PIN = D9;
-const int C2_PIN = A6;
-const int C3_PIN = D1;
-const int OUT_PIN = D11;
+    // Matrix input and output
+    static const int C0 = A2;
+    static const int C1 = D9;
+    static const int C2 = A6;
+    static const int C3 = D1;
+    static const int OUT = D11;
 
-// Audio analogue out
-const int OUTL_PIN = A4;
-const int OUTR_PIN = A3;
+    // Audio output
+    static const int OUTL = A4;
+    static const int OUTR = A3;
 
-// Joystick analogue in
-const int JOYY_PIN = A0;
-const int JOYX_PIN = A1;
+    // Joystick input
+    static const int JOYY = A0;
+    static const int JOYX = A1;
+};
 
-// Output multiplexer bits
-const int DEN_BIT = 3;
-const int DRST_BIT = 4;
-const int HKOW_BIT = 5;
-const int HKOE_BIT = 6;
+// Multiplexer control bits
+struct MuxBits
+{
+    static const int DEN = 3;  // Display enable
+    static const int DRST = 4; // Display reset
+    static const int HKOW = 5; // Handshake output west
+    static const int HKOE = 6; // Handshake output east
+};
 
-// Global variable to store the notes
+// Timer and Display objects
+HardwareTimer sampleTimer(TIM1);
+U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
+
+//------------------
+// Synthesizer state
+//------------------
+
+// Note management
 volatile uint16_t localActiveNotes = 0;
 volatile uint16_t remoteActiveNotes = 0;
 
-// Global volatile variable for volume control
-// This will be accessed by both the ISR and the knob update task
+// Sound control
 volatile int8_t volumeControl = 0;
 volatile int32_t pitchBend = 0;
+volatile int8_t localOctaveShift = 0;
+volatile int8_t remoteOctaveShift = 0;
 
-// Timer object
-HardwareTimer sampleTimer(TIM1);
+//---------------------
+// Performance monitoring
+//---------------------
+#ifdef TEST_SCAN_KEYS
+volatile uint32_t scanKeysInitTime = 0;
+volatile uint32_t scanKeysExecTimeTotal = 0;
+volatile uint32_t scanKeysExecTimeMax = 0;
+volatile uint32_t scanKeysExecCount = 0;
+#endif
 
-// Display driver object
-U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
+#ifdef TEST_DISPLAY
+volatile uint32_t displayInitTime = 0;
+volatile uint32_t displayExecTimeTotal = 0;
+volatile uint32_t displayExecTimeMax = 0;
+volatile uint32_t displayExecCount = 0;
+#endif
 
-void drawWaveform(uint8_t waveform)
+#ifdef TEST_DECODE
+volatile uint32_t decodeInitTime = 0;
+volatile uint32_t decodeExecTimeTotal = 0;
+volatile uint32_t decodeExecTimeMax = 0;
+volatile uint32_t decodeExecCount = 0;
+#endif
+
+#ifdef TEST_CAN_TX
+volatile uint32_t canTxInitTime = 0;
+volatile uint32_t canTxExecTimeTotal = 0;
+volatile uint32_t canTxExecTimeMax = 0;
+volatile uint32_t canTxExecCount = 0;
+#endif
+
+volatile uint32_t schedulerStartTime = 0;
+
+// Task handles
+TaskHandle_t scanKeysHandle = NULL;
+TaskHandle_t displayUpdateHandle = NULL;
+TaskHandle_t decodeTaskHandle = NULL;
+
+// Constants
+const uint32_t interval = 100; // Display update interval
+
+// CAN message format
+struct CANMsg
 {
-    int xStart = 80, yStart = 10; // Position on OLED
-    int width = 16, height = 8;   // Waveform drawing size
-    int yMid = yStart + height / 2;
+    static const uint8_t MSG_SIZE = 8;
+    static const uint32_t ID = 0x123;
 
-    for (int x = 0; x < width; x++)
-    {
-        float angle = (x * 2.0f * PI) / width; // Map to 0 - 360°
-        int y = yMid;                          // Default position
+    // Message byte indices
+    static const uint8_t TYPE = 0;   // Message type (P/R)
+    static const uint8_t OCTAVE = 1; // Octave number (0-7)
+    static const uint8_t NOTE = 2;   // Note number (0-11)
 
-        switch (static_cast<Waveform>(waveform)) {
-            case Waveform::SINE:
-                y = yMid - (sin(angle) * (height / 2));
-                break;
-            case Waveform::SAWTOOTH:
-                y = yStart + (height * x) / width;
-                break;
-            case Waveform::TRIANGLE:
-                y = yStart + (height * abs((2 * x / (float)width) - 1));
-                break;
-            case Waveform::SQUARE:
-                y = (x < width / 2) ? yStart : yStart + height;
-                break;
-            default:
-                y = yMid;  // Default to center position
-                break;
-        }
-
-        u8g2.drawPixel(xStart + x, y);
-    }
-}
+    // Message types
+    static const char PRESS = 'P';
+    static const char RELEASE = 'R';
+};
 
 /*------------------------------------------------------------------------------------------*/
+// Knob configuration
+struct KnobConfig
+{
+    static const uint8_t VOLUME = 0;   // Volume control (0-7)
+    static const uint8_t WAVEFORM = 1; // Waveform selection (0-3)
+    static const uint8_t OCTAVE = 2;   // Octave control (0-7)
+    static const uint8_t UNUSED = 3;   // Unused knob
+};
 
 // Knob class definition for managing rotary encoders
 class Knob
@@ -307,6 +155,11 @@ private:
     int8_t minValue;   // Minimum allowed value
     int8_t maxValue;   // Maximum allowed value
 
+    // Accumulator for rotation movement
+    int8_t accumulator;
+    // Threshold to trigger an actual value change
+    static const int8_t ROTATION_THRESHOLD = 2;
+
     // Lookup table for rotation direction based on state transitions
     static const int8_t rotationTable[4][4];
 
@@ -315,7 +168,7 @@ public:
     Knob(uint8_t row, uint8_t colA, uint8_t colB, int8_t initialValue = 0,
          int8_t min = -127, int8_t max = 127)
         : rowIndex(row), colA(colA), colB(colB), prevState(0),
-          value(initialValue), minValue(min), maxValue(max) {}
+          value(initialValue), minValue(min), maxValue(max), accumulator(0) {}
 
     // Update rotation value using latest inputs
     bool update(std::bitset<4> columnReadings)
@@ -327,15 +180,43 @@ public:
 
         if (rotationChange != 0)
         {
-            // Apply change with bounds checking
-            int8_t newValue = value + rotationChange;
-            if (newValue >= minValue && newValue <= maxValue)
-            {
-                value = newValue;
-                // Serial.println("Knob " + rowIndex);
-                // Serial.println("Value: " + value);
+            // Add rotation to accumulator
+            accumulator += rotationChange;
 
-                return true; // Value was changed
+            // Check if accumulator exceeds threshold (in either direction)
+            if (accumulator >= ROTATION_THRESHOLD)
+            {
+                // Apply positive change with bounds checking
+                int8_t newValue = value + 1;
+                if (newValue <= maxValue)
+                {
+                    value = newValue;
+                    // Reset accumulator, but keep remainder for smoother feel
+                    accumulator -= ROTATION_THRESHOLD;
+                    return true; // Value was changed
+                }
+                else
+                {
+                    // Clamp at max
+                    accumulator = ROTATION_THRESHOLD - 1;
+                }
+            }
+            else if (accumulator <= -ROTATION_THRESHOLD)
+            {
+                // Apply negative change with bounds checking
+                int8_t newValue = value - 1;
+                if (newValue >= minValue)
+                {
+                    value = newValue;
+                    // Reset accumulator, but keep remainder for smoother feel
+                    accumulator += ROTATION_THRESHOLD;
+                    return true; // Value was changed
+                }
+                else
+                {
+                    // Clamp at min
+                    accumulator = -(ROTATION_THRESHOLD - 1);
+                }
             }
         }
         return false; // No change
@@ -372,6 +253,8 @@ public:
         if (newValue >= minValue && newValue <= maxValue)
         {
             value = newValue;
+            // Reset accumulator when setting value directly
+            accumulator = 0;
         }
     }
 };
@@ -383,116 +266,151 @@ const int8_t Knob::rotationTable[4][4] = {
     {1, 0, 0, -1},
     {0, -1, 1, 0}};
 
-// Threading
-struct
+// Threading state and resources
+struct SystemState
 {
     SemaphoreHandle_t mutex;
     QueueHandle_t txQueue;
     QueueHandle_t rxQueue;
     SemaphoreHandle_t CAN_TX_Semaphore;
     Knob knobs[4] = {
-        Knob(3, 0, 1, 0, 0, 7),  // Knob 3: Row 3, cols 0,1, volume control (0-7)
-        Knob(3, 2, 3, 0, 0, static_cast<int8_t>(Waveform::WAVEFORM_COUNT)-1), // Knob 2: Row 3, cols 2,3, 
-        Knob(4, 0, 1, 0, 0, 15), // Knob 1: Row 4, cols 0,1, unused
-        Knob(4, 2, 3, 0, 0, 15)  // Knob 0: Row 4, cols 2,3, unused
+        Knob(3, 0, 1, 0, 0, 7),                                                 // Volume knob
+        Knob(3, 2, 3, 0, 0, static_cast<int8_t>(Waveform::WAVEFORM_COUNT) - 1), // Waveform knob
+        Knob(4, 0, 1, 0, 0, 7),                                                 // Octave knob
+        Knob(4, 2, 3, 0, 0, 15)                                                 // Unused knob
     };
-    uint8_t RX_Message[8]; //
+    uint8_t RX_Message[8];
 } sysState;
 
-// Task handles
-TaskHandle_t scanKeysHandle = NULL;
-TaskHandle_t displayUpdateHandle = NULL;
-TaskHandle_t decodeTaskHandle = NULL;
+// Function to draw waveform visualization on display
+void drawWaveform(uint8_t waveform)
+{
+    int xStart = 80, yStart = 10; // Position on OLED
+    int width = 16, height = 8;   // Waveform drawing size
+    int yMid = yStart + height / 2;
+
+    for (int x = 0; x < width; x++)
+    {
+        float angle = (x * 2.0f * PI) / width; // Map to 0 - 360°
+        int y = yMid;                          // Default position
+
+        switch (static_cast<Waveform>(waveform))
+        {
+        case Waveform::SINE:
+            y = yMid - (sin(angle) * (height / 2));
+            break;
+        case Waveform::SAWTOOTH:
+            y = yStart + (height * x) / width;
+            break;
+        case Waveform::TRIANGLE:
+            y = yStart + (height * abs((2 * x / (float)width) - 1));
+            break;
+        case Waveform::SQUARE:
+            y = (x < width / 2) ? yStart : yStart + height;
+            break;
+        default:
+            y = yMid; // Default to center position
+            break;
+        }
+
+        u8g2.drawPixel(xStart + x, y);
+    }
+}
 
 // Function to set outputs using key matrix
 void setOutMuxBit(const uint8_t bitIdx, const bool value)
 {
-    digitalWrite(REN_PIN, LOW);
-    digitalWrite(RA0_PIN, bitIdx & 0x01);
-    digitalWrite(RA1_PIN, bitIdx & 0x02);
-    digitalWrite(RA2_PIN, bitIdx & 0x04);
-    digitalWrite(OUT_PIN, value);
-    digitalWrite(REN_PIN, HIGH);
+    digitalWrite(Pins::REN, LOW);
+    digitalWrite(Pins::RA0, bitIdx & 0x01);
+    digitalWrite(Pins::RA1, bitIdx & 0x02);
+    digitalWrite(Pins::RA2, bitIdx & 0x04);
+    digitalWrite(Pins::OUT, value);
+    digitalWrite(Pins::REN, HIGH);
     delayMicroseconds(2);
-    digitalWrite(REN_PIN, LOW);
+    digitalWrite(Pins::REN, LOW);
 }
 
+// Read columns from the matrix
 std::bitset<4> readCols()
 {
     std::bitset<4> result;
-    result[0] = digitalRead(C0_PIN);
-    result[1] = digitalRead(C1_PIN);
-    result[2] = digitalRead(C2_PIN);
-    result[3] = digitalRead(C3_PIN);
+    result[0] = digitalRead(Pins::C0);
+    result[1] = digitalRead(Pins::C1);
+    result[2] = digitalRead(Pins::C2);
+    result[3] = digitalRead(Pins::C3);
     return result;
 }
 
+// Set the active row for scanning
 void setRow(uint8_t rowIdx)
 {
     // Disable row select
-    digitalWrite(REN_PIN, LOW);
+    digitalWrite(Pins::REN, LOW);
 
     // Set row select address
-    digitalWrite(RA0_PIN, rowIdx & 0x01);
-    digitalWrite(RA1_PIN, rowIdx & 0x02);
-    digitalWrite(RA2_PIN, rowIdx & 0x04);
+    digitalWrite(Pins::RA0, rowIdx & 0x01);
+    digitalWrite(Pins::RA1, rowIdx & 0x02);
+    digitalWrite(Pins::RA2, rowIdx & 0x04);
 
     // Enable row select
-    digitalWrite(REN_PIN, HIGH);
+    digitalWrite(Pins::REN, HIGH);
 }
 
 /*------------------------------ISRs-------------------------------------------*/
 
+// Audio sample generation ISR
 void sampleISR()
 {
-    static uint32_t phaseAcc[12] = {0}; // Phase accumulator, static (stores value between calls)
+    static uint32_t phaseAcc[12] = {0}; // Phase accumulator
     uint16_t localActive = __atomic_load_n(&localActiveNotes, __ATOMIC_RELAXED);
     uint16_t remoteActive = __atomic_load_n(&remoteActiveNotes, __ATOMIC_RELAXED);
     uint16_t allActive = localActive | remoteActive;
 
     int32_t pitch = __atomic_load_n(&pitchBend, __ATOMIC_RELAXED);
-    int8_t octave = __atomic_load_n(&octaveShift, __ATOMIC_RELAXED);
+    int8_t localOctave = __atomic_load_n(&localOctaveShift, __ATOMIC_RELAXED);
+    int8_t remoteOctave = __atomic_load_n(&remoteOctaveShift, __ATOMIC_RELAXED);
     Waveform waveform = static_cast<Waveform>(__atomic_load_n(&currentWaveform, __ATOMIC_RELAXED));
 
     int32_t Vout = 0;
     int numActive = __builtin_popcount(allActive);
 
-    // Serial.println(pitch);
     for (int i = 0; i < 12; i++)
     {
-        if (allActive & (1 << i))
+        // Process local notes with local octave
+        if (localActive & (1 << i))
         {
-            // Apply octave shift by multiplying step size by 2^octave
-            // This effectively doubles/halves the frequency for each octave up/down
+            // Apply local octave shift
             uint32_t octaveAdjustedStepSize;
-            if (octave >= 0) {
-                octaveAdjustedStepSize = stepSizes[i] << octave; // Shift left for positive octaves
-            } else {
-                octaveAdjustedStepSize = stepSizes[i] >> (-octave); // Shift right for negative octaves
+            if (localOctave >= 0)
+            {
+                octaveAdjustedStepSize = stepSizes[i] << localOctave;
             }
-            
-            phaseAcc[i] += octaveAdjustedStepSize + pitch;
+            else
+            {
+                octaveAdjustedStepSize = stepSizes[i] >> (-localOctave);
+            }
 
-            // Use the phase accumulator to index into the appropriate waveform LUT
-            uint8_t index = (phaseAcc[i] >> 24) & 0xFF;  // Use top 8 bits as index
-            
-            switch (waveform) {
-                case Waveform::SINE:
-                    Vout += sineLUT[index];
-                    break;
-                case Waveform::SAWTOOTH:
-                    Vout += sawtoothLUT[index];
-                    break;
-                case Waveform::TRIANGLE:
-                    Vout += triangleLUT[index];
-                    break;
-                case Waveform::SQUARE:
-                    Vout += squareLUT[index];
-                    break;
-                default:
-                    Vout += sawtoothLUT[index];  // Default to sawtooth
-                    break;
+            phaseAcc[i] += octaveAdjustedStepSize + pitch;
+            uint8_t index = (phaseAcc[i] >> 24) & 0xFF;
+            Vout += getWaveformSample(waveform, index);
+        }
+        // Process remote notes with remote octave
+        else if (remoteActive & (1 << i))
+        {
+            // Apply remote octave shift
+            uint32_t octaveAdjustedStepSize;
+            if (remoteOctave >= 0)
+            {
+                octaveAdjustedStepSize = stepSizes[i] << remoteOctave;
             }
+            else
+            {
+                octaveAdjustedStepSize = stepSizes[i] >> (-remoteOctave);
+            }
+
+            phaseAcc[i] += octaveAdjustedStepSize + pitch;
+            uint8_t index = (phaseAcc[i] >> 24) & 0xFF;
+            Vout += getWaveformSample(waveform, index);
         }
     }
 
@@ -523,10 +441,11 @@ void sampleISR()
                                               : Vout;
 
     analogReadResolution(12);
-    analogWrite(OUTR_PIN, Vout + 128);
-    analogWrite(OUTL_PIN, Vout + 128); // Add output to left channel too
+    analogWrite(Pins::OUTR, Vout + 128);
+    analogWrite(Pins::OUTL, Vout + 128); // Add output to left channel too
 }
 
+// CAN RX interrupt handler
 void CAN_RX_ISR()
 {
     uint32_t ID;
@@ -534,11 +453,11 @@ void CAN_RX_ISR()
     while (CAN_CheckRXLevel())
     {
         CAN_RX(ID, RX_Message_ISR);
-        // l.println("CAN RX ISR triggered");
         xQueueSendFromISR(sysState.rxQueue, RX_Message_ISR, NULL);
     }
 }
 
+// CAN TX interrupt handler
 void CAN_TX_ISR()
 {
     xSemaphoreGiveFromISR(sysState.CAN_TX_Semaphore, NULL);
@@ -548,17 +467,22 @@ void CAN_TX_ISR()
 // Display update task
 void displayUpdateTask(void *pvParameters)
 {
+#ifdef TEST_DISPLAY
+    displayInitTime = micros() - schedulerStartTime;
+#endif
     const TickType_t xFrequency = 100 / portTICK_PERIOD_MS;
     TickType_t xLastWakeTime = xTaskGetTickCount();
     uint8_t localRxMessage[8];
 
     while (1)
     {
-        vTaskDelayUntil(&xLastWakeTime, xFrequency);
+#ifdef TEST_DISPLAY
+        uint32_t startTime = micros();
+#endif
 
         int8_t volume = __atomic_load_n(&volumeControl, __ATOMIC_RELAXED);
-        
-        int8_t octave = __atomic_load_n(&octaveShift, __ATOMIC_RELAXED);
+        int8_t octave = __atomic_load_n(&localOctaveShift, __ATOMIC_RELAXED);
+        int8_t remoteOct = __atomic_load_n(&remoteOctaveShift, __ATOMIC_RELAXED);
         Waveform waveform = static_cast<Waveform>(__atomic_load_n(&currentWaveform, __ATOMIC_RELAXED));
 
         if (xSemaphoreTake(sysState.mutex, portMAX_DELAY) == pdTRUE)
@@ -574,6 +498,7 @@ void displayUpdateTask(void *pvParameters)
         u8g2.drawStr(2, 10, "Key: ");
         u8g2.setCursor(30, 10);
         u8g2.print(noteNames[localRxMessage[2]]);
+        u8g2.print(localRxMessage[1]);
 
         // Display Volume
         u8g2.drawStr(2, 20, "Volume: ");
@@ -582,32 +507,51 @@ void displayUpdateTask(void *pvParameters)
 
         u8g2.drawStr(2, 30, "Oct: ");
         u8g2.setCursor(30, 30);
-        u8g2.print(octave+4);
+        u8g2.print(octave);
 
         // Draw Waveform (0-360 degrees)
         drawWaveform(waveformToUint8(waveform));
 
-        // Display RX Message
-        u8g2.setCursor(80, 30);
-        if (localRxMessage[0] != 0)
-        {
-            u8g2.print((char)localRxMessage[0]);
-            u8g2.print(localRxMessage[1]);
-            u8g2.print(localRxMessage[2]);
-        }
-        else
-        {
-            u8g2.print("---");
-        }
+        // Display waveform name
+        u8g2.setCursor(75, 30);
+        u8g2.print(waveformToText(waveform));
 
         u8g2.sendBuffer();
         digitalToggle(LED_BUILTIN);
+#ifdef TEST_DISPLAY
+        uint32_t execTime = micros() - startTime;
+        displayExecTimeTotal += execTime;
+        if (execTime > displayExecTimeMax)
+            displayExecTimeMax = execTime;
+        displayExecCount++;
+
+        if (displayExecCount >= 100)
+        {
+            float avg = (float)displayExecTimeTotal / displayExecCount / 1000.0;
+            Serial.print("Display: Init=");
+            Serial.print(displayInitTime / 1000.0, 2);
+            Serial.print("ms, AvgExec=");
+            Serial.print(avg, 3);
+            Serial.print("ms, MaxExec=");
+            Serial.print(displayExecTimeMax / 1000.0, 2);
+            Serial.println("ms");
+            // Reset counters
+            displayExecTimeTotal = 0;
+            displayExecTimeMax = 0;
+            displayExecCount = 0;
+        }
+#endif
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
 }
 
 // Key scanning task
 void scanKeysTask(void *pvParameters)
 {
+#ifdef TEST_SCAN_KEYS
+    scanKeysInitTime = micros() - schedulerStartTime;
+#endif
+
     const TickType_t xFrequency = 10 / portTICK_PERIOD_MS;
     TickType_t xLastWakeTime = xTaskGetTickCount();
     uint8_t txMsg[8] = {0};
@@ -615,7 +559,10 @@ void scanKeysTask(void *pvParameters)
 
     while (1)
     {
-        vTaskDelayUntil(&xLastWakeTime, xFrequency);
+#ifdef TEST_SCAN_KEYS
+        uint32_t startTime = micros();
+#endif
+
         uint16_t newLocalActiveNotes = 0;
         int lastKeyPressed = -1; // default: no key pressed
 
@@ -638,31 +585,23 @@ void scanKeysTask(void *pvParameters)
                     bool changed = sysState.knobs[k].update(colState);
 
                     // If this is the volume knob (knob 0) and it changed, update volume immediately
-                    if (k == 0 && changed)
+                    if (k == KnobConfig::VOLUME && changed)
                     {
-                        int8_t newVolume = sysState.knobs[0].getValue();
+                        int8_t newVolume = sysState.knobs[KnobConfig::VOLUME].getValue();
                         xSemaphoreGive(sysState.mutex);
-
-                        // Update the atomic volume control variable
                         __atomic_store_n(&volumeControl, newVolume, __ATOMIC_RELAXED);
                     }
-                    else if (k == 1 && changed)
+                    else if (k == KnobConfig::WAVEFORM && changed)
                     {
-                        int8_t waveSelection = sysState.knobs[1].getValue();
+                        int8_t waveSelection = sysState.knobs[KnobConfig::WAVEFORM].getValue();
                         xSemaphoreGive(sysState.mutex);
-
-                        uint8_t newWaveform = sysState.knobs[1].getValue();
-
-                        __atomic_store_n(&currentWaveform, newWaveform, __ATOMIC_RELAXED);
+                        __atomic_store_n(&currentWaveform, waveSelection, __ATOMIC_RELAXED);
                     }
-                    else if (k == 2 && changed)
+                    else if (k == KnobConfig::OCTAVE && changed)
                     {
-                        // This is the octave shift knob
-                        int8_t newOctave = sysState.knobs[2].getValue();
+                        int8_t newOctave = sysState.knobs[KnobConfig::OCTAVE].getValue();
                         xSemaphoreGive(sysState.mutex);
-
-                        // Update the atomic octave shift variable
-                        __atomic_store_n(&octaveShift, newOctave, __ATOMIC_RELAXED);
+                        __atomic_store_n(&localOctaveShift, newOctave, __ATOMIC_RELAXED);
                     }
                     else
                     {
@@ -689,33 +628,33 @@ void scanKeysTask(void *pvParameters)
             }
         }
 
-        int32_t freqOffset = 0;
         // Scan joystick to apply pitch bend
-        int joyX = analogRead(JOYX_PIN);
-        // joyX reads min 18 max 1024
-        // Center position is around 477, deadzone is 400-550
-        int joyY = analogRead(JOYY_PIN);
-        
+        int joyX = analogRead(Pins::JOYX);
+        int joyY = analogRead(Pins::JOYY);
+
         // Define constants for pitch bend
         const int DEADZONE_LOW = 400;
         const int DEADZONE_HIGH = 500;
-        const int32_t MAX_PITCH_BEND = 1000000;  // Reduced from 3000000 for more musical range
-        const float SMOOTHING_FACTOR = 0.1f;      // For smooth transitions
-        
-        static int32_t currentPitchBend = 0;      // Store current pitch bend for smoothing
-        
+        const int32_t MAX_PITCH_BEND = 1000000; // Reduced from 3000000 for more musical range
+        const float SMOOTHING_FACTOR = 0.1f;    // For smooth transitions
+
+        static int32_t currentPitchBend = 0; // Store current pitch bend for smoothing
+
         // Calculate pitch bend with deadzone
-        if (joyX > DEADZONE_HIGH) {
+        if (joyX > DEADZONE_HIGH)
+        {
             // Map right side (550-1024) to positive pitch bend
             int32_t targetBend = map(joyX, DEADZONE_HIGH, 1024, 0, MAX_PITCH_BEND + 1000000);
             currentPitchBend = currentPitchBend + (targetBend - currentPitchBend) * SMOOTHING_FACTOR;
         }
-        else if (joyX < DEADZONE_LOW) {
+        else if (joyX < DEADZONE_LOW)
+        {
             // Map left side (0-400) to negative pitch bend
             int32_t targetBend = map(joyX, DEADZONE_LOW, 0, 0, -MAX_PITCH_BEND);
             currentPitchBend = currentPitchBend + (targetBend - currentPitchBend) * SMOOTHING_FACTOR;
         }
-        else {
+        else
+        {
             // In deadzone, gradually return to center
             currentPitchBend = currentPitchBend * (1.0f - SMOOTHING_FACTOR);
         }
@@ -730,99 +669,138 @@ void scanKeysTask(void *pvParameters)
         {
             if (pressed & (1 << i))
             {
-                txMsg[0] = 'P';
-                txMsg[1] = 4;
-                txMsg[2] = i;
+                txMsg[CANMsg::TYPE] = CANMsg::PRESS;
+                txMsg[CANMsg::OCTAVE] = __atomic_load_n(&localOctaveShift, __ATOMIC_RELAXED) + 4;
+                txMsg[CANMsg::NOTE] = i;
                 xQueueSend(sysState.txQueue, txMsg, 0);
             }
             if (released & (1 << i))
             {
-                txMsg[0] = 'R';
-                txMsg[1] = 4;
-                txMsg[2] = i;
+                txMsg[CANMsg::TYPE] = CANMsg::RELEASE;
+                txMsg[CANMsg::OCTAVE] = __atomic_load_n(&localOctaveShift, __ATOMIC_RELAXED) + 4;
+                txMsg[CANMsg::NOTE] = i;
                 xQueueSend(sysState.txQueue, txMsg, 0);
             }
         }
 
         prevLocalActiveNotes = newLocalActiveNotes;
         __atomic_store_n(&localActiveNotes, newLocalActiveNotes, __ATOMIC_RELAXED);
+#ifdef TEST_SCAN_KEYS
+        uint32_t execTime = micros() - startTime;
+        scanKeysExecTimeTotal += execTime;
+        if (execTime > scanKeysExecTimeMax)
+            scanKeysExecTimeMax = execTime;
+        scanKeysExecCount++;
+
+        if (scanKeysExecCount >= 100)
+        {
+            float avg = (float)scanKeysExecTimeTotal / scanKeysExecCount / 1000.0;
+            Serial.print("ScanKeys: Init=");
+            Serial.print(scanKeysInitTime / 1000.0, 2);
+            Serial.print("ms, AvgExec=");
+            Serial.print(avg, 3);
+            Serial.print("ms, MaxExec=");
+            Serial.print(scanKeysExecTimeMax / 1000.0, 2);
+            Serial.println("ms");
+            // Reset counters
+            scanKeysExecTimeTotal = 0;
+            scanKeysExecTimeMax = 0;
+            scanKeysExecCount = 0;
+        }
+#endif
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
 }
 
 void decodeTask(void *pvParameters)
 {
-    uint8_t rxMsg[8];
+#ifdef TEST_DECODE
+    decodeInitTime = micros() - schedulerStartTime;
+#endif
+    uint8_t rxMsg[CANMsg::MSG_SIZE];
 
     while (1)
     {
+#ifdef TEST_DECODE
+        uint32_t startTime = micros();
+#endif
+
         if (xQueueReceive(sysState.rxQueue, rxMsg, portMAX_DELAY) == pdTRUE)
         {
-            if (rxMsg[0] == 'P')
+            if (rxMsg[CANMsg::TYPE] == CANMsg::PRESS)
             {
-                uint8_t note = rxMsg[2];
+                uint8_t note = rxMsg[CANMsg::NOTE];
+                int8_t receivedOctave = rxMsg[CANMsg::OCTAVE] - 4; // Convert from 0-7 back to -4 to +4
                 __atomic_fetch_or(&remoteActiveNotes, (1 << note), __ATOMIC_RELAXED);
+                __atomic_store_n(&remoteOctaveShift, receivedOctave, __ATOMIC_RELAXED);
             }
-            else if (rxMsg[0] == 'R')
+            else if (rxMsg[CANMsg::TYPE] == CANMsg::RELEASE)
             {
-                uint8_t note = rxMsg[2];
+                uint8_t note = rxMsg[CANMsg::NOTE];
                 __atomic_fetch_and(&remoteActiveNotes, ~(1 << note), __ATOMIC_RELAXED);
             }
 
-            // Update RX_Message for display
             if (xSemaphoreTake(sysState.mutex, portMAX_DELAY) == pdTRUE)
             {
-                memcpy(sysState.RX_Message, rxMsg, 8);
+                memcpy(sysState.RX_Message, rxMsg, CANMsg::MSG_SIZE);
                 xSemaphoreGive(sysState.mutex);
             }
         }
+#ifdef TEST_DECODE
+        uint32_t execTime = micros() - startTime;
+        decodeExecTimeTotal += execTime;
+        if (execTime > decodeExecTimeMax)
+            decodeExecTimeMax = execTime;
+        decodeExecCount++;
+#endif
     }
 }
 
 void canTxTask(void *pvParameters)
 {
-    uint8_t txMsg[8];
+    uint8_t txMsg[CANMsg::MSG_SIZE];
 
     while (1)
     {
-        // Wait for a message from the TX queue
         xQueueReceive(sysState.txQueue, txMsg, portMAX_DELAY);
-        CAN_TX(0x123, txMsg);
+        CAN_TX(CANMsg::ID, txMsg);
     }
 }
-/*----------------------------THE REST--------------------------------------------*/
+
+/*----------------------------SETUP AND LOOP--------------------------------------------*/
 
 void setup()
 {
     // Set pin directions
-    pinMode(RA0_PIN, OUTPUT);
-    pinMode(RA1_PIN, OUTPUT);
-    pinMode(RA2_PIN, OUTPUT);
-    pinMode(REN_PIN, OUTPUT);
-    pinMode(OUT_PIN, OUTPUT);
-    pinMode(OUTL_PIN, OUTPUT);
-    pinMode(OUTR_PIN, OUTPUT);
+    pinMode(Pins::RA0, OUTPUT);
+    pinMode(Pins::RA1, OUTPUT);
+    pinMode(Pins::RA2, OUTPUT);
+    pinMode(Pins::REN, OUTPUT);
+    pinMode(Pins::OUT, OUTPUT);
+    pinMode(Pins::OUTL, OUTPUT);
+    pinMode(Pins::OUTR, OUTPUT);
     pinMode(LED_BUILTIN, OUTPUT);
 
-    pinMode(C0_PIN, INPUT);
-    pinMode(C1_PIN, INPUT);
-    pinMode(C2_PIN, INPUT);
-    pinMode(C3_PIN, INPUT);
-    pinMode(JOYX_PIN, INPUT);
-    pinMode(JOYY_PIN, INPUT);
+    pinMode(Pins::C0, INPUT);
+    pinMode(Pins::C1, INPUT);
+    pinMode(Pins::C2, INPUT);
+    pinMode(Pins::C3, INPUT);
+    pinMode(Pins::JOYX, INPUT);
+    pinMode(Pins::JOYY, INPUT);
 
     // Initialise display
-    setOutMuxBit(DRST_BIT, LOW); // Assert display logic reset
+    setOutMuxBit(MuxBits::DRST, LOW); // Assert display logic reset
     delayMicroseconds(2);
-    setOutMuxBit(DRST_BIT, HIGH); // Release display logic reset
+    setOutMuxBit(MuxBits::DRST, HIGH); // Release display logic reset
     u8g2.begin();
-    setOutMuxBit(DEN_BIT, HIGH); // Enable display power supply
+    setOutMuxBit(MuxBits::DEN, HIGH); // Enable display power supply
 
     // Initialise UART
     Serial.begin(9600);
     Serial.println("Synthesizer Started");
 
     // Initialize the keyboard
-    setOutMuxBit(HKOE_BIT, HIGH); // Enable keyboard output
+    setOutMuxBit(MuxBits::HKOE, HIGH); // Enable keyboard output
 
     // Init CAN bus
     CAN_Init(); // true for loopback, false for normal
@@ -855,10 +833,15 @@ void setup()
     }
 
     // Initialize volume control with default value
-    __atomic_store_n(&volumeControl, 0, __ATOMIC_RELAXED);
-    
+    __atomic_store_n(&volumeControl, 5, __ATOMIC_RELAXED);
+
     __atomic_store_n(&octaveShift, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&currentWaveform, waveformToUint8(Waveform::SAWTOOTH), __ATOMIC_RELAXED);
+
+    __atomic_store_n(&localOctaveShift, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&remoteOctaveShift, 0, __ATOMIC_RELAXED);
+    // Initialize waveform LUTs
+    // initWaveformLUTs();  // Removed since we're using hardcoded values
 
     // Timer and interrupt set up - do this AFTER initializing volume control
     sampleTimer.setOverflow(22000, HERTZ_FORMAT);
@@ -900,6 +883,7 @@ void setup()
 
     // Start the scheduler
     Serial.println("Starting FreeRTOS scheduler");
+    schedulerStartTime = micros(); // Record start time
     vTaskStartScheduler();
 
     // Code should never reach here if scheduler starts properly
