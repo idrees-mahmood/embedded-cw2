@@ -276,7 +276,7 @@ struct SystemState
     Knob knobs[4] = {
         Knob(3, 0, 1, 0, 0, 7),                                                 // Volume knob
         Knob(3, 2, 3, 0, 0, static_cast<int8_t>(Waveform::WAVEFORM_COUNT) - 1), // Waveform knob
-        Knob(4, 0, 1, 0, 0, 7),                                                 // Octave knob
+        Knob(4, 0, 1, 0, -3, 3),                                                 // Octave knob
         Knob(4, 2, 3, 0, 0, 15)                                                 // Unused knob
     };
     uint8_t RX_Message[8];
