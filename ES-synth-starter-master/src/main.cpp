@@ -635,7 +635,6 @@ void canTxTask(void *pvParameters)
     {
         // Wait for a message from the TX queue
         xQueueReceive(sysState.txQueue, txMsg, portMAX_DELAY);
-        xSemaphoreTake(sysState.CAN_TX_Semaphore, portMAX_DELAY);
         CAN_TX(0x123, txMsg);
     }
 }
