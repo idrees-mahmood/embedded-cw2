@@ -29,6 +29,58 @@ const uint32_t stepSizes[12] = {
     96418755  // B4
 };
 
+// Waveform Generation
+
+//Use LUT cause its easier
+const int LUT_SIZE = 216;
+
+int8_t sineLUT[LUT_SIZE];
+int8_t sawtoothLUT[LUT_SIZE];
+int8_t triangleLUT[LUT_SIZE];
+int8_t squareLUT[LUT_SIZE];
+
+enum Waveform {
+    SINE = 0,
+    SAWTOOTH = 1,
+    TRIANGLE = 2,
+    SQUARE = 3,
+    WAVEFORM_COUNT = 4 
+};
+
+// default wave
+volatile uint8_t currentWaveform = SAWTOOTH;
+
+void initWaveformLUTs() {
+    // Initialize sine wave LUT
+    for (int i = 0; i < LUT_SIZE; i++) {
+        // Convert to range -127 to 127
+        sineLUT[i] = (int8_t)(127.0f * sin(2.0f * PI * i / LUT_SIZE));
+    }
+    
+    // Initialize sawtooth wave LUT
+    for (int i = 0; i < LUT_SIZE; i++) {
+        // Properly scale from -127 to 127 across LUT_SIZE
+        sawtoothLUT[i] = (int8_t)(-127 + (2 * 127 * i) / (LUT_SIZE - 1));
+    }
+    
+    // Initialize triangle wave LUT
+    for (int i = 0; i < LUT_SIZE; i++) {
+        // First half rises from -127 to 127
+        if (i < LUT_SIZE / 2) {
+            triangleLUT[i] = (int8_t)(-127 + (2 * 127 * i) / (LUT_SIZE / 2 - 1));
+        } 
+        // Second half falls from 127 to -127
+        else {
+            triangleLUT[i] = (int8_t)(127 - (2 * 127 * (i - LUT_SIZE / 2)) / (LUT_SIZE / 2 - 1));
+        }
+    }
+    
+    for (int i = 0; i < LUT_SIZE; i++) {
+        squareLUT[i] = (i < LUT_SIZE / 2) ? 127 : -127;
+    }
+    
+}
+
 // Pin definitions
 // Row select and enable
 const int RA0_PIN = D3;
@@ -71,6 +123,37 @@ HardwareTimer sampleTimer(TIM1);
 
 // Display driver object
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
+
+void drawWaveform(uint8_t waveform) {
+    int xStart = 80, yStart = 10;  // Position on OLED
+    int width = 16, height = 8;   // Waveform drawing size
+    int yMid = yStart + height / 2;
+
+    for (int x = 0; x < width; x++) {
+        float angle = (x * 2.0f * PI) / width;  // Map to 0 - 360°
+        int y = yMid;  // Default position
+
+        switch (waveform) {
+            case 0:  // Sine Wave
+                y = yMid - (sin(angle) * (height / 2));
+                break;
+
+            case 1:  // Sawtooth Wave
+                y = yStart + (height * x) / width;
+                break;
+
+            case 2:  // Triangle Wave
+                y = yStart + (height * abs((2 * x / (float)width) - 1));
+                break;
+
+            case 3:  // Square Wave
+                y = (x < width / 2) ? yStart : yStart + height;
+                break;
+        }
+
+        u8g2.drawPixel(xStart + x, y);
+    }
+}
 
 /*------------------------------------------------------------------------------------------*/
 
@@ -171,7 +254,7 @@ struct
     SemaphoreHandle_t CAN_TX_Semaphore;
     Knob knobs[4] = {
         Knob(3, 0, 1, 0, 0, 7),  // Knob 3: Row 3, cols 0,1, volume control (0-7)
-        Knob(3, 2, 3, 0, 0, 15), // Knob 2: Row 3, cols 2,3, unused
+        Knob(3, 2, 3, 0, 0, WAVEFORM_COUNT-1), // Knob 2: Row 3, cols 2,3, 
         Knob(4, 0, 1, 0, 0, 15), // Knob 1: Row 4, cols 0,1, unused
         Knob(4, 2, 3, 0, 0, 15)  // Knob 0: Row 4, cols 2,3, unused
     };
@@ -230,6 +313,7 @@ void sampleISR()
     uint16_t allActive = localActive | remoteActive;
     
     int32_t pitch = __atomic_load_n(&pitchBend, __ATOMIC_RELAXED);
+    uint8_t waveform = __atomic_load_n(&currentWaveform, __ATOMIC_RELAXED);
 
     int32_t Vout = 0;
     int numActive = __builtin_popcount(allActive);
@@ -239,10 +323,27 @@ void sampleISR()
     {
         if (allActive & (1 << i))
         {
-            
             phaseAcc[i] += stepSizes[i] + pitch;
-            // Vout += (int32_t)(sinLUT[(phaseAcc[i] >> 20) & 0x3ff]) * 127 / numActive;
-            Vout += (phaseAcc[i] >> 24) - 128; // Sawtooth wave
+            
+            // Use the phase accumulator to index into the appropriate waveform LUT
+            uint8_t index = (phaseAcc[i] >> 24) & 0xFF;  // Use top 8 bits as index
+            
+            switch (waveform) {
+                case SINE:
+                    Vout += sineLUT[index];
+                    break;
+                case SAWTOOTH:
+                    Vout += sawtoothLUT[index];
+                    break;
+                case TRIANGLE:
+                    Vout += triangleLUT[index];
+                    break;
+                case SQUARE:
+                    Vout += squareLUT[index];
+                    break;
+                default:
+                    Vout += sawtoothLUT[index];  // Default to sawtooth
+            }
         }
     }
 
@@ -272,6 +373,7 @@ void sampleISR()
     // Clamp output to 8-bit range
     Vout = (Vout > 127) ? 127 : (Vout < -128) ? -128 : Vout;
 
+    analogReadResolution(12);
     analogWrite(OUTR_PIN, Vout + 128);
     analogWrite(OUTL_PIN, Vout + 128); // Add output to left channel too
 }
@@ -295,69 +397,64 @@ void CAN_TX_ISR()
 
 /*---------------------------------------TASKS--------------------------------------*/
 // Display update task
-void displayUpdateTask(void *pvParameters)
-{
+void displayUpdateTask(void *pvParameters) {
     const TickType_t xFrequency = 100 / portTICK_PERIOD_MS;
     TickType_t xLastWakeTime = xTaskGetTickCount();
     uint8_t localRxMessage[8];
 
-    while (1)
-    {
+    while (1) {
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
 
-        // Get volume value directly from the atomic global
         int8_t volume = __atomic_load_n(&volumeControl, __ATOMIC_RELAXED);
+        uint8_t waveform = __atomic_load_n(&currentWaveform, __ATOMIC_RELAXED);
 
-        // Get the latest RX message data under mutex protection
-        if (xSemaphoreTake(sysState.mutex, portMAX_DELAY) == pdTRUE)
-        {
+        if (xSemaphoreTake(sysState.mutex, portMAX_DELAY) == pdTRUE) {
             memcpy(localRxMessage, sysState.RX_Message, 8);
             xSemaphoreGive(sysState.mutex);
         }
 
-        // Update display
-        u8g2.clearBuffer();                   // clear the internal memory
-        u8g2.setFont(u8g2_font_ncenB08_tr);   // choose a suitable font
-        u8g2.drawStr(2, 10, "Pressed key: "); // write something to the internal memory
-        u8g2.setCursor(75, 10);
+        u8g2.clearBuffer();
+        u8g2.setFont(u8g2_font_ncenB08_tr);
+
+        // Display pressed key
+        u8g2.drawStr(2, 10, "Key: ");
+        u8g2.setCursor(30, 10);
         u8g2.print(noteNames[localRxMessage[2]]);
 
-        u8g2.setCursor(2, 20);
-        u8g2.print("Volume: ");
+        // Display Volume
+        u8g2.drawStr(2, 20, "Volume: ");
+        u8g2.setCursor(50, 20);
         u8g2.print(volume);
 
-        // Display additional knob values if needed
+        // Draw Waveform (0-360 degrees)
+        drawWaveform(waveform);
+
+        // Display Knobs
         u8g2.setCursor(2, 30);
         u8g2.print("Knobs: ");
-        if (xSemaphoreTake(sysState.mutex, portMAX_DELAY) == pdTRUE)
-        {
-            for (int i = 1; i < 4; i++)
-            {
+        if (xSemaphoreTake(sysState.mutex, portMAX_DELAY) == pdTRUE) {
+            for (int i = 1; i < 4; i++) {
                 u8g2.print(sysState.knobs[i].getValue());
                 u8g2.print(" ");
             }
             xSemaphoreGive(sysState.mutex);
         }
 
-        // Display the latest RX message
+        // Display RX Message
         u8g2.setCursor(80, 30);
-        if (localRxMessage[0] != 0) // Only display if we have received something
-        {
-            u8g2.print((char)localRxMessage[0]); // 'P' or 'R'
-            u8g2.print(localRxMessage[1]);       // Octave
-            u8g2.print(localRxMessage[2]);       // Note
-        }
-        else
-        {
-            u8g2.print("---"); // No message received yet
+        if (localRxMessage[0] != 0) {
+            u8g2.print((char)localRxMessage[0]);
+            u8g2.print(localRxMessage[1]);
+            u8g2.print(localRxMessage[2]);
+        } else {
+            u8g2.print("---");
         }
 
-        u8g2.sendBuffer(); // transfer internal memory to the display
-
-        // Toggle LED for visual feedback
+        u8g2.sendBuffer();
         digitalToggle(LED_BUILTIN);
     }
 }
+
 
 // Key scanning task
 void scanKeysTask(void *pvParameters)
@@ -399,6 +496,15 @@ void scanKeysTask(void *pvParameters)
 
                         // Update the atomic volume control variable
                         __atomic_store_n(&volumeControl, newVolume, __ATOMIC_RELAXED);
+                    }
+                    else if (k == 1 && changed)
+                    {
+                        int8_t waveSelection = sysState.knobs[1].getValue();
+                        xSemaphoreGive(sysState.mutex);
+                                 
+                        uint8_t newWaveform = sysState.knobs[1].getValue();
+
+                        __atomic_store_n(&currentWaveform, newWaveform, __ATOMIC_RELAXED);
                     }
                     else
                     {
@@ -558,6 +664,8 @@ void setup()
     setCANFilter(0x123, 0x7ff);
     CAN_Start();
 
+    initWaveformLUTs();
+
     // Create queues
     sysState.txQueue = xQueueCreate(100, 8); // Queue for outgoing messages
     sysState.rxQueue = xQueueCreate(100, 8); // Queue for incoming messages
@@ -583,6 +691,7 @@ void setup()
 
     // Initialize volume control with default value
     __atomic_store_n(&volumeControl, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&currentWaveform, SAWTOOTH, __ATOMIC_RELAXED);
 
     // Timer and interrupt set up - do this AFTER initializing volume control
     sampleTimer.setOverflow(22000, HERTZ_FORMAT);
