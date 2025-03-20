@@ -11,75 +11,169 @@
 
 // Constants
 const uint32_t interval = 100; // Display update interval
+const uint32_t f0 = 440;       // Reference frequency (A4 = 440 Hz)
+const uint32_t fs = 22000;     // Sample rate
+
 const char *noteNames[12] = {"C", "C#", "D", "D#", "E", "F",
                              "F#", "G", "G#", "A", "A#", "B"};
+
+// Base step sizes for octave 0
 const uint32_t stepSizes[12] = {
-    // Step sizes of 12 notes
-    51076056, // C4
-    54113197, // C#4
-    57330935, // D4
-    60740009, // D#4
-    64351798, // E4
-    68178356, // F4
-    72232452, // F#4
-    76527617, // G4
-    81078186, // G#4
-    85899345, // A4 (440 Hz)
-    91007186, // A#4
-    96418755  // B4
+    (uint32_t)((pow(2.0, (0.0 / 12.0)) * f0 / fs) * pow(2.0, 32)),  // C
+    (uint32_t)((pow(2.0, (1.0 / 12.0)) * f0 / fs) * pow(2.0, 32)),  // C#
+    (uint32_t)((pow(2.0, (2.0 / 12.0)) * f0 / fs) * pow(2.0, 32)),  // D
+    (uint32_t)((pow(2.0, (3.0 / 12.0)) * f0 / fs) * pow(2.0, 32)),  // D#
+    (uint32_t)((pow(2.0, (4.0 / 12.0)) * f0 / fs) * pow(2.0, 32)),  // E
+    (uint32_t)((pow(2.0, (5.0 / 12.0)) * f0 / fs) * pow(2.0, 32)),  // F
+    (uint32_t)((pow(2.0, (6.0 / 12.0)) * f0 / fs) * pow(2.0, 32)),  // F#
+    (uint32_t)((pow(2.0, (7.0 / 12.0)) * f0 / fs) * pow(2.0, 32)),  // G
+    (uint32_t)((pow(2.0, (8.0 / 12.0)) * f0 / fs) * pow(2.0, 32)),  // G#
+    (uint32_t)((pow(2.0, (9.0 / 12.0)) * f0 / fs) * pow(2.0, 32)),  // A
+    (uint32_t)((pow(2.0, (10.0 / 12.0)) * f0 / fs) * pow(2.0, 32)), // A#
+    (uint32_t)((pow(2.0, (11.0 / 12.0)) * f0 / fs) * pow(2.0, 32))  // B
 };
+
 
 // Waveform Generation
 
-//Use LUT cause its easier
-const int LUT_SIZE = 216;
-
-int8_t sineLUT[LUT_SIZE];
-int8_t sawtoothLUT[LUT_SIZE];
-int8_t triangleLUT[LUT_SIZE];
-int8_t squareLUT[LUT_SIZE];
-
-enum Waveform {
+enum Waveform
+{
     SINE = 0,
     SAWTOOTH = 1,
     TRIANGLE = 2,
     SQUARE = 3,
-    WAVEFORM_COUNT = 4 
+    WAVEFORM_COUNT = 4
 };
 
 // default wave
 volatile uint8_t currentWaveform = SAWTOOTH;
 
-void initWaveformLUTs() {
-    // Initialize sine wave LUT
-    for (int i = 0; i < LUT_SIZE; i++) {
-        // Convert to range -127 to 127
-        sineLUT[i] = (int8_t)(127.0f * sin(2.0f * PI * i / LUT_SIZE));
-    }
-    
-    // Initialize sawtooth wave LUT
-    for (int i = 0; i < LUT_SIZE; i++) {
-        // Properly scale from -127 to 127 across LUT_SIZE
-        sawtoothLUT[i] = (int8_t)(-127 + (2 * 127 * i) / (LUT_SIZE - 1));
-    }
-    
-    // Initialize triangle wave LUT
-    for (int i = 0; i < LUT_SIZE; i++) {
-        // First half rises from -127 to 127
-        if (i < LUT_SIZE / 2) {
-            triangleLUT[i] = (int8_t)(-127 + (2 * 127 * i) / (LUT_SIZE / 2 - 1));
-        } 
-        // Second half falls from 127 to -127
-        else {
-            triangleLUT[i] = (int8_t)(127 - (2 * 127 * (i - LUT_SIZE / 2)) / (LUT_SIZE / 2 - 1));
-        }
-    }
-    
-    for (int i = 0; i < LUT_SIZE; i++) {
-        squareLUT[i] = (i < LUT_SIZE / 2) ? 127 : -127;
-    }
-    
-}
+volatile int8_t octaveShift = 0;
+
+const int8_t sineLUT[512] = {
+    0, 1, 3, 4, 6, 7, 9, 10, 12, 13, 15, 17, 18, 20, 21, 23,
+    24, 26, 27, 29, 30, 32, 33, 35, 36, 38, 39, 41, 42, 44, 45, 47,
+    48, 50, 51, 52, 54, 55, 57, 58, 59, 61, 62, 63, 65, 66, 67, 69,
+    70, 71, 73, 74, 75, 76, 78, 79, 80, 81, 82, 84, 85, 86, 87, 88,
+    89, 90, 91, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 102, 103, 104,
+    105, 106, 107, 108, 108, 109, 110, 111, 112, 112, 113, 114, 114, 115, 116, 116,
+    117, 117, 118, 119, 119, 120, 120, 121, 121, 121, 122, 122, 123, 123, 123, 124,
+    124, 124, 125, 125, 125, 125, 126, 126, 126, 126, 126, 126, 126, 126, 126, 126,
+    127, 126, 126, 126, 126, 126, 126, 126, 126, 126, 126, 125, 125, 125, 125, 124,
+    124, 124, 123, 123, 123, 122, 122, 121, 121, 121, 120, 120, 119, 119, 118, 117,
+    117, 116, 116, 115, 114, 114, 113, 112, 112, 111, 110, 109, 108, 108, 107, 106,
+    105, 104, 103, 102, 102, 101, 100, 99, 98, 97, 96, 95, 94, 93, 91, 90,
+    89, 88, 87, 86, 85, 84, 82, 81, 80, 79, 78, 76, 75, 74, 73, 71,
+    70, 69, 67, 66, 65, 63, 62, 61, 59, 58, 57, 55, 54, 52, 51, 50,
+    48, 47, 45, 44, 42, 41, 39, 38, 36, 35, 33, 32, 30, 29, 27, 26,
+    24, 23, 21, 20, 18, 17, 15, 13, 12, 10, 9, 7, 6, 4, 3, 1,
+    0, -1, -3, -4, -6, -7, -9, -10, -12, -13, -15, -17, -18, -20, -21, -23,
+    -24, -26, -27, -29, -30, -32, -33, -35, -36, -38, -39, -41, -42, -44, -45, -47,
+    -48, -50, -51, -52, -54, -55, -57, -58, -59, -61, -62, -63, -65, -66, -67, -69,
+    -70, -71, -73, -74, -75, -76, -78, -79, -80, -81, -82, -84, -85, -86, -87, -88,
+    -89, -90, -91, -93, -94, -95, -96, -97, -98, -99, -100, -101, -102, -102, -103, -104,
+    -105, -106, -107, -108, -108, -109, -110, -111, -112, -112, -113, -114, -114, -115, -116, -116,
+    -117, -117, -118, -119, -119, -120, -120, -121, -121, -121, -122, -122, -123, -123, -123, -124,
+    -124, -124, -125, -125, -125, -125, -126, -126, -126, -126, -126, -126, -126, -126, -126, -126,
+    -127, -126, -126, -126, -126, -126, -126, -126, -126, -126, -126, -125, -125, -125, -125, -124,
+    -124, -124, -123, -123, -123, -122, -122, -121, -121, -121, -120, -120, -119, -119, -118, -117,
+    -117, -116, -116, -115, -114, -114, -113, -112, -112, -111, -110, -109, -108, -108, -107, -106,
+    -105, -104, -103, -102, -102, -101, -100, -99, -98, -97, -96, -95, -94, -93, -91, -90,
+    -89, -88, -87, -86, -85, -84, -82, -81, -80, -79, -78, -76, -75, -74, -73, -71,
+    -70, -69, -67, -66, -65, -63, -62, -61, -59, -58, -57, -55, -54, -52, -51, -50,
+    -48, -47, -45, -44, -42, -41, -39, -38, -36, -35, -33, -32, -30, -29, -27, -26,
+    -24, -23, -21, -20, -18, -17, -15, -13, -12, -10, -9, -7, -6, -4, -3, -1,
+};
+
+const int8_t sawtoothLUT[512] = {
+    -127, -126, -126, -125, -125, -124, -124, -123, -123, -122, -122, -121, -121, -120, -120, -119,
+    -119, -118, -118, -117, -117, -116, -116, -115, -115, -114, -114, -113, -113, -112, -112, -111,
+    -111, -110, -110, -109, -109, -108, -108, -107, -107, -106, -106, -105, -105, -104, -104, -103,
+    -103, -102, -102, -101, -101, -100, -100, -99, -99, -98, -98, -97, -97, -96, -96, -95,
+    -95, -94, -94, -93, -93, -92, -92, -91, -91, -90, -90, -89, -89, -88, -88, -87,
+    -87, -86, -86, -85, -85, -84, -84, -83, -83, -82, -82, -81, -81, -80, -80, -79,
+    -79, -78, -78, -77, -77, -76, -76, -75, -75, -74, -74, -73, -73, -72, -72, -71,
+    -71, -70, -70, -69, -69, -68, -68, -67, -67, -66, -66, -65, -65, -64, -64, -63,
+    -63, -62, -62, -61, -61, -60, -60, -59, -59, -58, -58, -57, -57, -56, -56, -55,
+    -55, -54, -54, -53, -53, -52, -52, -51, -51, -50, -50, -49, -49, -48, -48, -47,
+    -47, -46, -46, -45, -45, -44, -44, -43, -43, -42, -42, -42, -41, -41, -40, -40,
+    -39, -39, -38, -38, -37, -37, -36, -36, -35, -35, -34, -34, -33, -33, -32, -32,
+    -31, -31, -30, -30, -29, -29, -28, -28, -27, -27, -26, -26, -25, -25, -24, -24,
+    -23, -23, -22, -22, -21, -21, -20, -20, -19, -19, -18, -18, -17, -17, -16, -16,
+    -15, -15, -14, -14, -13, -13, -12, -12, -11, -11, -10, -10, -9, -9, -8, -8,
+    -7, -7, -6, -6, -5, -5, -4, -4, -3, -3, -2, -2, -1, -1, 0, 0,
+    0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7,
+    8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15,
+    16, 16, 17, 17, 18, 18, 19, 19, 20, 20, 21, 21, 22, 22, 23, 23,
+    24, 24, 25, 25, 26, 26, 27, 27, 28, 28, 29, 29, 30, 30, 31, 31,
+    32, 32, 33, 33, 34, 34, 35, 35, 36, 36, 37, 37, 38, 38, 39, 39,
+    40, 40, 41, 41, 42, 42, 42, 43, 43, 44, 44, 45, 45, 46, 46, 47,
+    47, 48, 48, 49, 49, 50, 50, 51, 51, 52, 52, 53, 53, 54, 54, 55,
+    55, 56, 56, 57, 57, 58, 58, 59, 59, 60, 60, 61, 61, 62, 62, 63,
+    63, 64, 64, 65, 65, 66, 66, 67, 67, 68, 68, 69, 69, 70, 70, 71,
+    71, 72, 72, 73, 73, 74, 74, 75, 75, 76, 76, 77, 77, 78, 78, 79,
+    79, 80, 80, 81, 81, 82, 82, 83, 83, 84, 84, 85, 85, 86, 86, 87,
+    87, 88, 88, 89, 89, 90, 90, 91, 91, 92, 92, 93, 93, 94, 94, 95,
+    95, 96, 96, 97, 97, 98, 98, 99, 99, 100, 100, 101, 101, 102, 102, 103,
+    103, 104, 104, 105, 105, 106, 106, 107, 107, 108, 108, 109, 109, 110, 110, 111,
+    111, 112, 112, 113, 113, 114, 114, 115, 115, 116, 116, 117, 117, 118, 118, 119,
+    119, 120, 120, 121, 121, 122, 122, 123, 123, 124, 124, 125, 125, 126, 126, 127,
+};
+
+const int8_t triangleLUT[512] = {
+    -127, -126, -125, -124, -123, -122, -121, -120, -119, -118, -117, -116, -115, -114, -113, -112,
+    -111, -110, -109, -108, -107, -106, -105, -104, -103, -102, -101, -100, -99, -98, -97, -96,
+    -95, -94, -93, -92, -91, -90, -89, -88, -87, -86, -85, -84, -83, -82, -81, -80,
+    -79, -78, -77, -76, -75, -74, -73, -72, -71, -70, -69, -68, -67, -66, -65, -64,
+    -63, -62, -61, -60, -59, -58, -57, -56, -55, -54, -53, -52, -51, -50, -49, -48,
+    -47, -46, -45, -44, -43, -42, -41, -40, -39, -38, -37, -36, -35, -34, -33, -32,
+    -31, -30, -29, -28, -27, -26, -25, -24, -23, -22, -21, -20, -19, -18, -17, -16,
+    -15, -14, -13, -12, -11, -10, -9, -8, -7, -6, -5, -4, -3, -2, -1, 0,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+    16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+    32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+    48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
+    64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79,
+    80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
+    96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111,
+    112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127,
+    127, 126, 125, 124, 123, 122, 121, 120, 119, 118, 117, 116, 115, 114, 113, 112,
+    111, 110, 109, 108, 107, 106, 105, 104, 103, 102, 101, 100, 99, 98, 97, 96,
+    95, 94, 93, 92, 91, 90, 89, 88, 87, 86, 85, 84, 83, 82, 81, 80,
+    79, 78, 77, 76, 75, 74, 73, 72, 71, 70, 69, 68, 67, 66, 65, 64,
+    63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48,
+    47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 32,
+    31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16,
+    15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
+    0, -1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14, -15,
+    -16, -17, -18, -19, -20, -21, -22, -23, -24, -25, -26, -27, -28, -29, -30, -31,
+    -32, -33, -34, -35, -36, -37, -38, -39, -40, -41, -42, -43, -44, -45, -46, -47,
+    -48, -49, -50, -51, -52, -53, -54, -55, -56, -57, -58, -59, -60, -61, -62, -63,
+    -64, -65, -66, -67, -68, -69, -70, -71, -72, -73, -74, -75, -76, -77, -78, -79,
+    -80, -81, -82, -83, -84, -85, -86, -87, -88, -89, -90, -91, -92, -93, -94, -95,
+    -96, -97, -98, -99, -100, -101, -102, -103, -104, -105, -106, -107, -108, -109, -110, -111,
+    -112, -113, -114, -115, -116, -117, -118, -119, -120, -121, -122, -123, -124, -125, -126, -127,
+};
+
+const int8_t squareLUT[256] = {
+    127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127,
+    127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127,
+    127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127,
+    127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127,
+    127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127,
+    127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127,
+    127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127,
+    127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127, 127,
+    -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127,
+    -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127,
+    -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127,
+    -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127,
+    -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127,
+    -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127,
+    -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127,
+    -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127,
+};
+
 
 // Pin definitions
 // Row select and enable
@@ -124,31 +218,34 @@ HardwareTimer sampleTimer(TIM1);
 // Display driver object
 U8G2_SSD1305_128X32_ADAFRUIT_F_HW_I2C u8g2(U8G2_R0);
 
-void drawWaveform(uint8_t waveform) {
-    int xStart = 80, yStart = 10;  // Position on OLED
+void drawWaveform(uint8_t waveform)
+{
+    int xStart = 80, yStart = 10; // Position on OLED
     int width = 16, height = 8;   // Waveform drawing size
     int yMid = yStart + height / 2;
 
-    for (int x = 0; x < width; x++) {
-        float angle = (x * 2.0f * PI) / width;  // Map to 0 - 360°
-        int y = yMid;  // Default position
+    for (int x = 0; x < width; x++)
+    {
+        float angle = (x * 2.0f * PI) / width; // Map to 0 - 360°
+        int y = yMid;                          // Default position
 
-        switch (waveform) {
-            case 0:  // Sine Wave
-                y = yMid - (sin(angle) * (height / 2));
-                break;
+        switch (waveform)
+        {
+        case 0: // Sine Wave
+            y = yMid - (sin(angle) * (height / 2));
+            break;
 
-            case 1:  // Sawtooth Wave
-                y = yStart + (height * x) / width;
-                break;
+        case 1: // Sawtooth Wave
+            y = yStart + (height * x) / width;
+            break;
 
-            case 2:  // Triangle Wave
-                y = yStart + (height * abs((2 * x / (float)width) - 1));
-                break;
+        case 2: // Triangle Wave
+            y = yStart + (height * abs((2 * x / (float)width) - 1));
+            break;
 
-            case 3:  // Square Wave
-                y = (x < width / 2) ? yStart : yStart + height;
-                break;
+        case 3: // Square Wave
+            y = (x < width / 2) ? yStart : yStart + height;
+            break;
         }
 
         u8g2.drawPixel(xStart + x, y);
@@ -253,10 +350,10 @@ struct
     QueueHandle_t rxQueue;
     SemaphoreHandle_t CAN_TX_Semaphore;
     Knob knobs[4] = {
-        Knob(3, 0, 1, 0, 0, 7),  // Knob 3: Row 3, cols 0,1, volume control (0-7)
-        Knob(3, 2, 3, 0, 0, WAVEFORM_COUNT-1), // Knob 2: Row 3, cols 2,3, 
-        Knob(4, 0, 1, 0, 0, 15), // Knob 1: Row 4, cols 0,1, unused
-        Knob(4, 2, 3, 0, 0, 15)  // Knob 0: Row 4, cols 2,3, unused
+        Knob(3, 0, 1, 0, 0, 7),                  // Knob 3: Row 3, cols 0,1, volume control (0-7)
+        Knob(3, 2, 3, 0, 0, WAVEFORM_COUNT - 1), // Knob 2: Row 3, cols 2,3,
+        Knob(4, 0, 1, 0, -4, 3),                 // Knob 1: Row 4, cols 0,1, unused
+        Knob(4, 2, 3, 0, 0, 15)                  // Knob 0: Row 4, cols 2,3, unused
     };
     uint8_t RX_Message[8]; //
 } sysState;
@@ -311,38 +408,49 @@ void sampleISR()
     uint16_t localActive = __atomic_load_n(&localActiveNotes, __ATOMIC_RELAXED);
     uint16_t remoteActive = __atomic_load_n(&remoteActiveNotes, __ATOMIC_RELAXED);
     uint16_t allActive = localActive | remoteActive;
-    
+
     int32_t pitch = __atomic_load_n(&pitchBend, __ATOMIC_RELAXED);
     uint8_t waveform = __atomic_load_n(&currentWaveform, __ATOMIC_RELAXED);
+    int8_t octave = __atomic_load_n(&octaveShift, __ATOMIC_RELAXED);
 
     int32_t Vout = 0;
     int numActive = __builtin_popcount(allActive);
 
-    //Serial.println(pitch);
+    // Serial.println(pitch);
     for (int i = 0; i < 12; i++)
     {
         if (allActive & (1 << i))
         {
-            phaseAcc[i] += stepSizes[i] + pitch;
+            // Apply octave shift by multiplying step size by 2^octave
+            // This effectively doubles/halves the frequency for each octave up/down
+            uint32_t octaveAdjustedStepSize;
+            if (octave >= 0) {
+                octaveAdjustedStepSize = stepSizes[i] << octave; // Shift left for positive octaves
+            } else {
+                octaveAdjustedStepSize = stepSizes[i] >> (-octave); // Shift right for negative octaves
+            }
             
+            phaseAcc[i] += octaveAdjustedStepSize + pitch;
+
             // Use the phase accumulator to index into the appropriate waveform LUT
-            uint8_t index = (phaseAcc[i] >> 24) & 0xFF;  // Use top 8 bits as index
-            
-            switch (waveform) {
-                case SINE:
-                    Vout += sineLUT[index];
-                    break;
-                case SAWTOOTH:
-                    Vout += sawtoothLUT[index];
-                    break;
-                case TRIANGLE:
-                    Vout += triangleLUT[index];
-                    break;
-                case SQUARE:
-                    Vout += squareLUT[index];
-                    break;
-                default:
-                    Vout += sawtoothLUT[index];  // Default to sawtooth
+            uint8_t index = (phaseAcc[i] >> 24) & 0xFF; // Use top 8 bits as index
+
+            switch (waveform)
+            {
+            case SINE:
+                Vout += sineLUT[index];
+                break;
+            case SAWTOOTH:
+                Vout += sawtoothLUT[index];
+                break;
+            case TRIANGLE:
+                Vout += triangleLUT[index];
+                break;
+            case SQUARE:
+                Vout += squareLUT[index];
+                break;
+            default:
+                Vout += sawtoothLUT[index]; // Default to sawtooth
             }
         }
     }
@@ -358,7 +466,6 @@ void sampleISR()
 
     // Use the global volumeControl variable - atomic and ISR-safe
     int8_t volume = __atomic_load_n(&volumeControl, __ATOMIC_RELAXED);
-    
 
     // Apply volume control by bit-shifting (with bounds checking)
     if (volume > 0 && volume < 8)
@@ -371,7 +478,8 @@ void sampleISR()
     }
 
     // Clamp output to 8-bit range
-    Vout = (Vout > 127) ? 127 : (Vout < -128) ? -128 : Vout;
+    Vout = (Vout > 127) ? 127 : (Vout < -128) ? -128
+                                              : Vout;
 
     analogReadResolution(12);
     analogWrite(OUTR_PIN, Vout + 128);
@@ -397,18 +505,22 @@ void CAN_TX_ISR()
 
 /*---------------------------------------TASKS--------------------------------------*/
 // Display update task
-void displayUpdateTask(void *pvParameters) {
+void displayUpdateTask(void *pvParameters)
+{
     const TickType_t xFrequency = 100 / portTICK_PERIOD_MS;
     TickType_t xLastWakeTime = xTaskGetTickCount();
     uint8_t localRxMessage[8];
 
-    while (1) {
+    while (1)
+    {
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
 
         int8_t volume = __atomic_load_n(&volumeControl, __ATOMIC_RELAXED);
         uint8_t waveform = __atomic_load_n(&currentWaveform, __ATOMIC_RELAXED);
+        int8_t octave = __atomic_load_n(&octaveShift, __ATOMIC_RELAXED);
 
-        if (xSemaphoreTake(sysState.mutex, portMAX_DELAY) == pdTRUE) {
+        if (xSemaphoreTake(sysState.mutex, portMAX_DELAY) == pdTRUE)
+        {
             memcpy(localRxMessage, sysState.RX_Message, 8);
             xSemaphoreGive(sysState.mutex);
         }
@@ -426,27 +538,23 @@ void displayUpdateTask(void *pvParameters) {
         u8g2.setCursor(50, 20);
         u8g2.print(volume);
 
+        u8g2.drawStr(2, 30, "Oct: ");
+        u8g2.setCursor(30, 30);
+        u8g2.print(octave+4);
+
         // Draw Waveform (0-360 degrees)
         drawWaveform(waveform);
 
-        // Display Knobs
-        u8g2.setCursor(2, 30);
-        u8g2.print("Knobs: ");
-        if (xSemaphoreTake(sysState.mutex, portMAX_DELAY) == pdTRUE) {
-            for (int i = 1; i < 4; i++) {
-                u8g2.print(sysState.knobs[i].getValue());
-                u8g2.print(" ");
-            }
-            xSemaphoreGive(sysState.mutex);
-        }
-
         // Display RX Message
         u8g2.setCursor(80, 30);
-        if (localRxMessage[0] != 0) {
+        if (localRxMessage[0] != 0)
+        {
             u8g2.print((char)localRxMessage[0]);
             u8g2.print(localRxMessage[1]);
             u8g2.print(localRxMessage[2]);
-        } else {
+        }
+        else
+        {
             u8g2.print("---");
         }
 
@@ -454,7 +562,6 @@ void displayUpdateTask(void *pvParameters) {
         digitalToggle(LED_BUILTIN);
     }
 }
-
 
 // Key scanning task
 void scanKeysTask(void *pvParameters)
@@ -501,10 +608,19 @@ void scanKeysTask(void *pvParameters)
                     {
                         int8_t waveSelection = sysState.knobs[1].getValue();
                         xSemaphoreGive(sysState.mutex);
-                                 
+
                         uint8_t newWaveform = sysState.knobs[1].getValue();
 
                         __atomic_store_n(&currentWaveform, newWaveform, __ATOMIC_RELAXED);
+                    }
+                    else if (k == 2 && changed)
+                    {
+                        // This is the octave shift knob
+                        int8_t newOctave = sysState.knobs[2].getValue();
+                        xSemaphoreGive(sysState.mutex);
+
+                        // Update the atomic octave shift variable
+                        __atomic_store_n(&octaveShift, newOctave, __ATOMIC_RELAXED);
                     }
                     else
                     {
@@ -537,9 +653,9 @@ void scanKeysTask(void *pvParameters)
         // joyX reads min 18 max 1024
         // deadzone is around 477 so set deadzone to 400-550
         int joyY = analogRead(JOYY_PIN);
-        
-        //Serial.println(joyX);
-        // Apply pitch bend to the notes
+
+        // Serial.println(joyX);
+        //  Apply pitch bend to the notes
         if (joyX > 550 || joyX < 400)
         {
             freqOffset = map(joyX, 0, 1024, 3000000, -3000000);
@@ -548,11 +664,10 @@ void scanKeysTask(void *pvParameters)
         {
             freqOffset = 0;
         }
-        //Serial.println("Freq offset: ");
-        //Serial.println(freqOffset);
+        // Serial.println("Freq offset: ");
+        // Serial.println(freqOffset);
 
         __atomic_store_n(&pitchBend, freqOffset, __ATOMIC_RELAXED);
-
 
         // Detect note changes and send CAN messages
         uint16_t pressed = newLocalActiveNotes & ~prevLocalActiveNotes;
@@ -658,13 +773,11 @@ void setup()
     setOutMuxBit(HKOE_BIT, HIGH); // Enable keyboard output
 
     // Init CAN bus
-    CAN_Init(true); // true for loopback, false for normal
+    CAN_Init(); // true for loopback, false for normal
     CAN_RegisterRX_ISR(CAN_RX_ISR);
     CAN_RegisterTX_ISR(CAN_TX_ISR);
     setCANFilter(0x123, 0x7ff);
     CAN_Start();
-
-    initWaveformLUTs();
 
     // Create queues
     sysState.txQueue = xQueueCreate(100, 8); // Queue for outgoing messages
@@ -692,6 +805,7 @@ void setup()
     // Initialize volume control with default value
     __atomic_store_n(&volumeControl, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&currentWaveform, SAWTOOTH, __ATOMIC_RELAXED);
+    __atomic_store_n(&octaveShift, 0, __ATOMIC_RELAXED);
 
     // Timer and interrupt set up - do this AFTER initializing volume control
     sampleTimer.setOverflow(22000, HERTZ_FORMAT);
