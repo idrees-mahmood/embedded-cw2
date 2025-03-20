@@ -39,7 +39,8 @@ int8_t sawtoothLUT[LUT_SIZE];
 int8_t triangleLUT[LUT_SIZE];
 int8_t squareLUT[LUT_SIZE];
 
-enum Waveform {
+// Define waveform types as a scoped enum for better type safety
+enum class Waveform : uint8_t {
     SINE = 0,
     SAWTOOTH = 1,
     TRIANGLE = 2,
@@ -47,8 +48,13 @@ enum Waveform {
     WAVEFORM_COUNT = 4 
 };
 
+// Helper function to convert Waveform to uint8_t
+inline uint8_t waveformToUint8(Waveform w) {
+    return static_cast<uint8_t>(w);
+}
+
 // default wave
-volatile uint8_t currentWaveform = SAWTOOTH;
+volatile uint8_t currentWaveform = waveformToUint8(Waveform::SAWTOOTH);
 
 void initWaveformLUTs() {
     // Initialize sine wave LUT
@@ -78,7 +84,6 @@ void initWaveformLUTs() {
     for (int i = 0; i < LUT_SIZE; i++) {
         squareLUT[i] = (i < LUT_SIZE / 2) ? 127 : -127;
     }
-    
 }
 
 // Pin definitions
@@ -133,21 +138,21 @@ void drawWaveform(uint8_t waveform) {
         float angle = (x * 2.0f * PI) / width;  // Map to 0 - 360°
         int y = yMid;  // Default position
 
-        switch (waveform) {
-            case 0:  // Sine Wave
+        switch (static_cast<Waveform>(waveform)) {
+            case Waveform::SINE:
                 y = yMid - (sin(angle) * (height / 2));
                 break;
-
-            case 1:  // Sawtooth Wave
+            case Waveform::SAWTOOTH:
                 y = yStart + (height * x) / width;
                 break;
-
-            case 2:  // Triangle Wave
+            case Waveform::TRIANGLE:
                 y = yStart + (height * abs((2 * x / (float)width) - 1));
                 break;
-
-            case 3:  // Square Wave
+            case Waveform::SQUARE:
                 y = (x < width / 2) ? yStart : yStart + height;
+                break;
+            default:
+                y = yMid;  // Default to center position
                 break;
         }
 
@@ -254,7 +259,7 @@ struct
     SemaphoreHandle_t CAN_TX_Semaphore;
     Knob knobs[4] = {
         Knob(3, 0, 1, 0, 0, 7),  // Knob 3: Row 3, cols 0,1, volume control (0-7)
-        Knob(3, 2, 3, 0, 0, WAVEFORM_COUNT-1), // Knob 2: Row 3, cols 2,3, 
+        Knob(3, 2, 3, 0, 0, static_cast<int8_t>(Waveform::WAVEFORM_COUNT)-1), // Knob 2: Row 3, cols 2,3, 
         Knob(4, 0, 1, 0, 0, 15), // Knob 1: Row 4, cols 0,1, unused
         Knob(4, 2, 3, 0, 0, 15)  // Knob 0: Row 4, cols 2,3, unused
     };
@@ -313,7 +318,7 @@ void sampleISR()
     uint16_t allActive = localActive | remoteActive;
     
     int32_t pitch = __atomic_load_n(&pitchBend, __ATOMIC_RELAXED);
-    uint8_t waveform = __atomic_load_n(&currentWaveform, __ATOMIC_RELAXED);
+    Waveform waveform = static_cast<Waveform>(__atomic_load_n(&currentWaveform, __ATOMIC_RELAXED));
 
     int32_t Vout = 0;
     int numActive = __builtin_popcount(allActive);
@@ -329,20 +334,21 @@ void sampleISR()
             uint8_t index = (phaseAcc[i] >> 24) & 0xFF;  // Use top 8 bits as index
             
             switch (waveform) {
-                case SINE:
+                case Waveform::SINE:
                     Vout += sineLUT[index];
                     break;
-                case SAWTOOTH:
+                case Waveform::SAWTOOTH:
                     Vout += sawtoothLUT[index];
                     break;
-                case TRIANGLE:
+                case Waveform::TRIANGLE:
                     Vout += triangleLUT[index];
                     break;
-                case SQUARE:
+                case Waveform::SQUARE:
                     Vout += squareLUT[index];
                     break;
                 default:
                     Vout += sawtoothLUT[index];  // Default to sawtooth
+                    break;
             }
         }
     }
@@ -406,7 +412,7 @@ void displayUpdateTask(void *pvParameters) {
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
 
         int8_t volume = __atomic_load_n(&volumeControl, __ATOMIC_RELAXED);
-        uint8_t waveform = __atomic_load_n(&currentWaveform, __ATOMIC_RELAXED);
+        Waveform waveform = static_cast<Waveform>(__atomic_load_n(&currentWaveform, __ATOMIC_RELAXED));
 
         if (xSemaphoreTake(sysState.mutex, portMAX_DELAY) == pdTRUE) {
             memcpy(localRxMessage, sysState.RX_Message, 8);
@@ -427,7 +433,7 @@ void displayUpdateTask(void *pvParameters) {
         u8g2.print(volume);
 
         // Draw Waveform (0-360 degrees)
-        drawWaveform(waveform);
+        drawWaveform(waveformToUint8(waveform));
 
         // Display Knobs
         u8g2.setCursor(2, 30);
@@ -535,23 +541,34 @@ void scanKeysTask(void *pvParameters)
         // Scan joystick to apply pitch bend
         int joyX = analogRead(JOYX_PIN);
         // joyX reads min 18 max 1024
-        // deadzone is around 477 so set deadzone to 400-550
+        // Center position is around 477, deadzone is 400-550
         int joyY = analogRead(JOYY_PIN);
         
-        //Serial.println(joyX);
-        // Apply pitch bend to the notes
-        if (joyX > 550 || joyX < 400)
-        {
-            freqOffset = map(joyX, 0, 1024, 3000000, -3000000);
+        // Define constants for pitch bend
+        const int DEADZONE_LOW = 400;
+        const int DEADZONE_HIGH = 500;
+        const int32_t MAX_PITCH_BEND = 1000000;  // Reduced from 3000000 for more musical range
+        const float SMOOTHING_FACTOR = 0.1f;      // For smooth transitions
+        
+        static int32_t currentPitchBend = 0;      // Store current pitch bend for smoothing
+        
+        // Calculate pitch bend with deadzone
+        if (joyX > DEADZONE_HIGH) {
+            // Map right side (550-1024) to positive pitch bend
+            int32_t targetBend = map(joyX, DEADZONE_HIGH, 1024, 0, MAX_PITCH_BEND + 1000000);
+            currentPitchBend = currentPitchBend + (targetBend - currentPitchBend) * SMOOTHING_FACTOR;
         }
-        else
-        {
-            freqOffset = 0;
+        else if (joyX < DEADZONE_LOW) {
+            // Map left side (0-400) to negative pitch bend
+            int32_t targetBend = map(joyX, DEADZONE_LOW, 0, 0, -MAX_PITCH_BEND);
+            currentPitchBend = currentPitchBend + (targetBend - currentPitchBend) * SMOOTHING_FACTOR;
         }
-        //Serial.println("Freq offset: ");
-        //Serial.println(freqOffset);
+        else {
+            // In deadzone, gradually return to center
+            currentPitchBend = currentPitchBend * (1.0f - SMOOTHING_FACTOR);
+        }
 
-        __atomic_store_n(&pitchBend, freqOffset, __ATOMIC_RELAXED);
+        __atomic_store_n(&pitchBend, currentPitchBend, __ATOMIC_RELAXED);
 
 
         // Detect note changes and send CAN messages
@@ -618,7 +635,6 @@ void canTxTask(void *pvParameters)
     {
         // Wait for a message from the TX queue
         xQueueReceive(sysState.txQueue, txMsg, portMAX_DELAY);
-        xSemaphoreTake(sysState.CAN_TX_Semaphore, portMAX_DELAY);
         CAN_TX(0x123, txMsg);
     }
 }
@@ -691,7 +707,7 @@ void setup()
 
     // Initialize volume control with default value
     __atomic_store_n(&volumeControl, 0, __ATOMIC_RELAXED);
-    __atomic_store_n(&currentWaveform, SAWTOOTH, __ATOMIC_RELAXED);
+    __atomic_store_n(&currentWaveform, waveformToUint8(Waveform::SAWTOOTH), __ATOMIC_RELAXED);
 
     // Timer and interrupt set up - do this AFTER initializing volume control
     sampleTimer.setOverflow(22000, HERTZ_FORMAT);
