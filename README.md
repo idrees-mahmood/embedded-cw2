@@ -15,8 +15,10 @@
 
 ## Introduction
 
-This report documents the implementation of a music synthesizer on an embedded system using FreeRTOS and a STM32 microcontroller. The project fulfils the requirements specified in the coursework, including core functional specifications, non-functional specifications, and additional advanced features. The synthesizer is capable of generating different waveforms, controlling volume, displaying information on an OLED screen, and communicating over a CAN bus in sender/receiver configurations.
 This report documents the implementation of a music synthesizer on an embedded system using FreeRTOS and a STM32 microcontroller. The included sections are the core functional specifications and some advanced features, including an octave shifter, multiple keyboard support, pitch bend, volume control and multiple waveform generators. The information is displayed on an OLED screen and the synthesiser communicates over a CAN bus in sender/receiver configurations.
+
+![My Image](knob_functions.jpg)
+
 
 ## System Architecture
 
