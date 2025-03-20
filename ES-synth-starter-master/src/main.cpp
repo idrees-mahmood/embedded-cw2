@@ -33,17 +33,6 @@ const uint32_t stepSizes[12] = {
     (uint32_t)((pow(2.0, (11.0 / 12.0)) * f0 / fs) * pow(2.0, 32))  // B
 };
 
-
-// Waveform Generation
-
-//Use LUT cause its easier
-const int LUT_SIZE = 216;
-
-int8_t sineLUT[LUT_SIZE];
-int8_t sawtoothLUT[LUT_SIZE];
-int8_t triangleLUT[LUT_SIZE];
-int8_t squareLUT[LUT_SIZE];
-
 // Define waveform types as a scoped enum for better type safety
 enum class Waveform : uint8_t {
     SINE = 0,
@@ -186,36 +175,6 @@ const int8_t squareLUT[256] = {
     -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127,
     -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127, -127,
 };
-
-void initWaveformLUTs() {
-    // Initialize sine wave LUT
-    for (int i = 0; i < LUT_SIZE; i++) {
-        // Convert to range -127 to 127
-        sineLUT[i] = (int8_t)(127.0f * sin(2.0f * PI * i / LUT_SIZE));
-    }
-    
-    // Initialize sawtooth wave LUT
-    for (int i = 0; i < LUT_SIZE; i++) {
-        // Properly scale from -127 to 127 across LUT_SIZE
-        sawtoothLUT[i] = (int8_t)(-127 + (2 * 127 * i) / (LUT_SIZE - 1));
-    }
-    
-    // Initialize triangle wave LUT
-    for (int i = 0; i < LUT_SIZE; i++) {
-        // First half rises from -127 to 127
-        if (i < LUT_SIZE / 2) {
-            triangleLUT[i] = (int8_t)(-127 + (2 * 127 * i) / (LUT_SIZE / 2 - 1));
-        } 
-        // Second half falls from 127 to -127
-        else {
-            triangleLUT[i] = (int8_t)(127 - (2 * 127 * (i - LUT_SIZE / 2)) / (LUT_SIZE / 2 - 1));
-        }
-    }
-    
-    for (int i = 0; i < LUT_SIZE; i++) {
-        squareLUT[i] = (i < LUT_SIZE / 2) ? 127 : -127;
-    }
-}
 
 // Pin definitions
 // Row select and enable
@@ -393,7 +352,7 @@ struct
     Knob knobs[4] = {
         Knob(3, 0, 1, 0, 0, 7),  // Knob 3: Row 3, cols 0,1, volume control (0-7)
         Knob(3, 2, 3, 0, 0, static_cast<int8_t>(Waveform::WAVEFORM_COUNT)-1), // Knob 2: Row 3, cols 2,3, 
-        Knob(4, 0, 1, 0, 0, 15), // Knob 1: Row 4, cols 0,1, unused
+        Knob(4, 0, 1, 0, -3, 3), // Knob 1: Row 4, cols 0,1, unused
         Knob(4, 2, 3, 0, 0, 15)  // Knob 0: Row 4, cols 2,3, unused
     };
     uint8_t RX_Message[8]; //
