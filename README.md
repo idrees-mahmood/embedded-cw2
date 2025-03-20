@@ -2,16 +2,16 @@
 
 ## Table of Contents
 
-1.   [[#Introduction]]
-2.   [[#System Architecture]]
-3.   [[#Task Identification and Implementation]]
-4.   [[#Task Characterization]]
-5.   [[#Critical Instant Analysis]]
-6.   [[#CPU Utilization]]
-7.   [[#Shared Data Structures and Protection Mechanisms]]
-8.   [[#Inter-task Blocking Dependencies]]
-9.   [[#Advanced Features]]
-10. [[#Conclusion]]
+1.   [Introduction](#introduction)  
+2.   [System Architecture](#system-architecture)  
+3.   [Task Identification and Implementation](#task-identification-and-implementation)  
+4.   [Task Characterization](#task-characterization)  
+5.   [Critical Instant Analysis](#critical-instant-analysis)  
+6.   [CPU Utilization](#cpu-utilization)  
+7.   [Shared Data Structures and Protection Mechanisms](#shared-data-structures-and-protection-mechanisms)  
+8.   [Inter-task Blocking Dependencies](#inter-task-blocking-dependencies)  
+9.   [Advanced Features](#advanced-features)  
+10.  [Conclusion](#conclusion)  
 
 ## Introduction
 
